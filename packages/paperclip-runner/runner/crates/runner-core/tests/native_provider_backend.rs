@@ -95,7 +95,7 @@ fn opencode_config(state_dir: &Path) -> DurableRunnerConfig {
     fs::write(
         &proxy_script,
         format!(
-            "#!/bin/sh\nexec '{}' --state-file '{}' --call-log '{}'\n",
+            "#!/bin/sh\nexec '{}' --state-file '{}' --call-log '{}' --require-completion-contract\n",
             env!("CARGO_BIN_EXE_fake-codex-app-server"),
             state_dir.join("fake-opencode-state.json").display(),
             state_dir.join("fake-opencode-calls.log").display(),

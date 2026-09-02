@@ -187,8 +187,8 @@ try {
     );
   }
 
-  const opencodeProxyPath = "dist/cli/opencode-app-server-proxy.js";
-  const acpxSidecarPath = "dist/cli/acpx-runtime-sidecar.js";
+  const opencodeProxyPath = "dist/cli/opencode-app-server-proxy.cjs";
+  const acpxSidecarPath = "dist/cli/acpx-runtime-sidecar.cjs";
   const opencodeCommand = "node_modules/.bin/opencode";
   const opencodeExecutable = "node_modules/opencode-ai/bin/opencode.exe";
   const nodeCommand = "node_modules/node/bin/node";

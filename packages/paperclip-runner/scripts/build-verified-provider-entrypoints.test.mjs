@@ -7,13 +7,15 @@ import {
   verifiedProviderEntrypoints,
 } from "./build-verified-provider-entrypoints.mjs";
 
-test("verified JS provider entrypoints bundle into one descriptor-safe file", async () => {
+test("provider entrypoints include self-contained ESM and descriptor-safe CommonJS bundles", async () => {
   const bundles = await bundleVerifiedProviderEntrypoints({ write: false });
   assert.equal(bundles.length, verifiedProviderEntrypoints.length);
-  for (const { entrypoint, result } of bundles) {
-    assert.equal(result.outputFiles?.length, 1, entrypoint.name);
-    const source = result.outputFiles[0].text;
-    assert.match(source, /^#!\/usr\/bin\/env node\n/);
+  for (const { entrypoint, result, verifiedResult } of bundles) {
+    for (const bundle of [result, verifiedResult]) {
+      assert.equal(bundle.outputFiles?.length, 1, entrypoint.name);
+      const source = bundle.outputFiles[0].text;
+      assert.match(source, /^#!\/usr\/bin\/env node\n/);
+    }
   }
 });
 
@@ -24,8 +26,10 @@ test("written provider entrypoints satisfy qualified launch permissions", async 
   }
   await bundleVerifiedProviderEntrypoints();
   for (const entrypoint of verifiedProviderEntrypoints) {
-    const mode = (await stat(entrypoint.output)).mode;
-    assert.equal(mode & 0o022, 0, entrypoint.name);
-    assert.notEqual(mode & 0o100, 0, entrypoint.name);
+    for (const output of [entrypoint.output, entrypoint.verifiedOutput]) {
+      const mode = (await stat(output)).mode;
+      assert.equal(mode & 0o022, 0, entrypoint.name);
+      assert.notEqual(mode & 0o100, 0, entrypoint.name);
+    }
   }
 });

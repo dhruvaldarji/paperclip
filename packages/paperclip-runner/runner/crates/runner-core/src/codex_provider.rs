@@ -15,9 +15,8 @@ use crate::durable::QualifiedLaunchArtifact;
 use crate::durable::{redact_text, OpenCodeLaunchProfile};
 use crate::local_runner::LocalRunnerError;
 use crate::process_supervisor::{
-    is_node_interpreter, verified_node_esm_loader_arguments, BoundedLogBuffer, ProcessOutput,
-    SupervisedProcess, VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_LOADER,
-    VERIFIED_NODE_EVAL_ARG,
+    BoundedLogBuffer, ProcessOutput, SupervisedProcess, VerifiedProcessArgument,
+    VerifiedProcessLaunch,
 };
 use crate::provider_bridge::{AuthorizedTool, DurableReplayFilter, ToolResult};
 use crate::provider_events::normalized_codex_terminal_event_type;
@@ -54,6 +53,12 @@ const OPENCODE_RUNTIME_REQUEST_METHOD: &str = "paperclip/runtimeRequest";
 pub(crate) const MAX_SETTLED_PROVIDER_TURN_IDS: usize = 4_096;
 type QuestionOptionLabels = BTreeMap<String, BTreeMap<String, String>>;
 type QuestionSetMapping = (String, Value, QuestionOptionLabels);
+
+#[derive(Clone)]
+struct ProviderCompletionContract {
+    revision: String,
+    criterion_ids: Vec<String>,
+}
 
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -525,6 +530,7 @@ pub struct CodexProvider {
     trace: Option<ProviderTraceSink>,
     last_trace_frame_id: Option<u64>,
     opencode_launch_profile: Option<OpenCodeLaunchProfile>,
+    completion_contract: Option<ProviderCompletionContract>,
 }
 
 impl CodexProvider {
@@ -532,7 +538,14 @@ impl CodexProvider {
         config: &CodexProviderConfig,
         resume_thread_id: Option<&str>,
     ) -> Result<Self, LocalRunnerError> {
-        Self::start_with_tools_for_generation(config, std::iter::empty(), resume_thread_id, 1, None)
+        Self::start_with_tools_for_generation(
+            config,
+            std::iter::empty(),
+            resume_thread_id,
+            1,
+            None,
+            None,
+        )
     }
 
     pub fn start_with_tools(
@@ -540,7 +553,14 @@ impl CodexProvider {
         authorized_tools: impl IntoIterator<Item = AuthorizedTool>,
         resume_thread_id: Option<&str>,
     ) -> Result<Self, LocalRunnerError> {
-        Self::start_with_tools_for_generation(config, authorized_tools, resume_thread_id, 1, None)
+        Self::start_with_tools_for_generation(
+            config,
+            authorized_tools,
+            resume_thread_id,
+            1,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn start_with_tools_for_generation(
@@ -549,6 +569,7 @@ impl CodexProvider {
         resume_thread_id: Option<&str>,
         process_generation: u64,
         opencode_launch_profile: Option<&OpenCodeLaunchProfile>,
+        completion_contract: Option<(&str, &[String])>,
     ) -> Result<Self, LocalRunnerError> {
         config.validate()?;
         if process_generation == 0 {
@@ -649,6 +670,12 @@ impl CodexProvider {
             trace: ProviderTraceSink::from_environment(),
             last_trace_frame_id: None,
             opencode_launch_profile: opencode_launch_profile.cloned(),
+            completion_contract: completion_contract.map(|(revision, criterion_ids)| {
+                ProviderCompletionContract {
+                    revision: revision.to_owned(),
+                    criterion_ids: criterion_ids.to_vec(),
+                }
+            }),
         };
         let initialized = provider.request(
             "initialize",
@@ -678,6 +705,17 @@ impl CodexProvider {
         let params_object = params
             .as_object_mut()
             .expect("Codex thread parameters are an object");
+        if config.provider == "opencode" {
+            if let Some(contract) = provider.completion_contract.as_ref() {
+                params_object.insert(
+                    "completionContract".to_owned(),
+                    json!({
+                        "revision": contract.revision,
+                        "criterionIds": contract.criterion_ids,
+                    }),
+                );
+            }
+        }
         let method = if let Some(thread_id) = resume_thread_id {
             params_object.insert("threadId".to_owned(), json!(thread_id));
             "thread/resume"
@@ -837,6 +875,7 @@ impl CodexProvider {
         let completed_turn_authority = self.completed_turn_authority.clone();
         let completion_reconciliation_pending = self.completion_reconciliation_pending;
         let durable_tool_call_replays = self.durable_tool_call_replays;
+        let completion_contract = self.completion_contract.clone();
 
         // Exact turn identities may be forgotten only after the provider
         // process that could emit them is gone. Resume the same thread in a
@@ -849,6 +888,12 @@ impl CodexProvider {
             Some(&thread_id),
             next_generation,
             self.opencode_launch_profile.as_ref(),
+            completion_contract.as_ref().map(|contract| {
+                (
+                    contract.revision.as_str(),
+                    contract.criterion_ids.as_slice(),
+                )
+            }),
         )?;
         replacement.durable_tool_call_replays = durable_tool_call_replays;
         if replacement.active_provider_turn_id.is_some() {
@@ -1949,18 +1994,11 @@ fn verified_opencode_launch(
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
     let executable = verify_launch_artifact(&profile.executable, "OpenCode provider executable")
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
-    let mut args = vec![
+    let args = vec![
         VerifiedProcessArgument::Artifact(proxy),
         VerifiedProcessArgument::Literal(TRUSTED_OPENCODE_EXECUTABLE_ARG.to_owned()),
         VerifiedProcessArgument::ExecutableArtifact(executable),
     ];
-    if is_node_interpreter(&profile.command.path) {
-        // The immutable verified proxy path is extensionless. Load its exact
-        // sealed bytes as an ESM data URL while leaving process.argv[1] bound
-        // to that descriptor, so the proxy retains its ordinary CLI contract.
-        // Qualified non-Node test/provider commands retain their arguments.
-        args.splice(0..0, verified_node_esm_loader_arguments());
-    }
     Ok(VerifiedProcessLaunch::new(command, args))
 }
 
@@ -2683,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_opencode_proxy_retains_esm_semantics_for_extensionless_snapshot() {
+    fn verified_opencode_proxy_executes_the_descriptor_safe_commonjs_bundle() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2694,10 +2732,10 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         let command = directory.join("node");
-        let proxy = directory.join("proxy.js");
+        let proxy = directory.join("proxy.cjs");
         let executable = directory.join("opencode");
         fs::write(&command, b"qualified node").unwrap();
-        fs::write(&proxy, b"export {};\n").unwrap();
+        fs::write(&proxy, b"module.exports = {};\n").unwrap();
         fs::write(&executable, b"qualified opencode").unwrap();
         let profile = OpenCodeLaunchProfile {
             command: qualified_artifact(&command),
@@ -2708,25 +2746,15 @@ mod tests {
         let launch = verified_opencode_launch(&profile).unwrap();
         assert!(matches!(
             launch.arguments().first(),
-            Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_EVAL_ARG
+            Some(VerifiedProcessArgument::Artifact(_))
         ));
         assert!(matches!(
             launch.arguments().get(1),
             Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_ESM_LOADER
-        ));
-        assert!(matches!(
-            launch.arguments().get(2),
-            Some(VerifiedProcessArgument::Artifact(_))
-        ));
-        assert!(matches!(
-            launch.arguments().get(3),
-            Some(VerifiedProcessArgument::Literal(argument))
                 if argument == TRUSTED_OPENCODE_EXECUTABLE_ARG
         ));
         assert!(matches!(
-            launch.arguments().get(4),
+            launch.arguments().get(2),
             Some(VerifiedProcessArgument::ExecutableArtifact(_))
         ));
         fs::remove_dir_all(directory).unwrap();

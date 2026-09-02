@@ -4448,8 +4448,8 @@ const REMOTE_PROVIDER_PACK_ARTIFACT_PATHS = {
   productionLock: "pnpm-lock.yaml",
   opencodeCommand: "node_modules/.bin/opencode",
   opencodeExecutable: "node_modules/opencode-ai/bin/opencode.exe",
-  opencodeProxy: "dist/cli/opencode-app-server-proxy.js",
-  acpxSidecar: "dist/cli/acpx-runtime-sidecar.js",
+  opencodeProxy: "dist/cli/opencode-app-server-proxy.cjs",
+  acpxSidecar: "dist/cli/acpx-runtime-sidecar.cjs",
 } as const;
 
 type RemoteProviderPackManifest = {

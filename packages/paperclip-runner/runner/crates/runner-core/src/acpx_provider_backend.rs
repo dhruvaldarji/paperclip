@@ -23,10 +23,7 @@ use crate::durable::{
     AcpxLaunchProfile, Command, CommandExecution, CommandExecutor, DurableRunnerConfig,
     DurableRunnerError, EventPriority, PolledEvent,
 };
-use crate::process_supervisor::{
-    is_node_interpreter, verified_node_esm_loader_arguments, VerifiedProcessArgument,
-    VerifiedProcessLaunch, VERIFIED_NODE_ESM_LOADER, VERIFIED_NODE_EVAL_ARG,
-};
+use crate::process_supervisor::{VerifiedProcessArgument, VerifiedProcessLaunch};
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
 };
@@ -213,7 +210,7 @@ impl AcpxProviderDescriptor {
                     "ACPX runner launch profile does not authenticate its command",
                 )
             })?;
-        let mut verified_args = launch_profile
+        let verified_args = launch_profile
             .args
             .iter()
             .map(|argument| {
@@ -232,13 +229,6 @@ impl AcpxProviderDescriptor {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Verified scripts are exposed to Node through an immutable descriptor
-        // path (for example /proc/self/fd/12), which intentionally has no .js
-        // suffix. A runner-owned eval loader reads that exact sealed descriptor
-        // and imports it as ESM without mutating the qualified launch artifact.
-        if is_node_interpreter(&launch_profile.command) {
-            verified_args.splice(0..0, verified_node_esm_loader_arguments());
-        }
         Ok(AcpxSidecarTransportConfig {
             command: launch_profile.command.clone(),
             args: launch_profile.args.clone(),
@@ -1409,7 +1399,7 @@ mod tests {
     fn binds_sidecar_paths_arguments_and_contents_to_the_runner_profile() {
         let directory = temporary_directory("launch-binding");
         let command = directory.join("node");
-        let sidecar = directory.join("sidecar.js");
+        let sidecar = directory.join("sidecar.cjs");
         write_artifact(&command, b"qualified node", true);
         write_artifact(&sidecar, b"qualified sidecar", false);
         let args = vec![sidecar.to_string_lossy().into_owned()];
@@ -1429,16 +1419,6 @@ mod tests {
         let verified_launch = transport.verified_launch.as_ref().unwrap();
         assert!(matches!(
             verified_launch.arguments().first(),
-            Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_EVAL_ARG
-        ));
-        assert!(matches!(
-            verified_launch.arguments().get(1),
-            Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_ESM_LOADER
-        ));
-        assert!(matches!(
-            verified_launch.arguments().get(2),
             Some(VerifiedProcessArgument::Artifact(_))
         ));
 

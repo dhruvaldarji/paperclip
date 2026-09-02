@@ -1001,6 +1001,12 @@ impl CodexCommandExecutor {
             Some(&thread_id),
             process_generation,
             self.opencode_launch_profile.as_ref(),
+            state.completion_contract.as_ref().map(|contract| {
+                (
+                    contract.revision.as_str(),
+                    contract.criterion_ids.as_slice(),
+                )
+            }),
         )
         .map_err(|error| {
             DurableRunnerError::invalid(format!(
@@ -1395,6 +1401,12 @@ impl CodexCommandExecutor {
                 state.thread_id.as_deref(),
                 process_generation,
                 self.opencode_launch_profile.as_ref(),
+                state.completion_contract.as_ref().map(|contract| {
+                    (
+                        contract.revision.as_str(),
+                        contract.criterion_ids.as_slice(),
+                    )
+                }),
             )
             .map_err(|error| {
                 DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))

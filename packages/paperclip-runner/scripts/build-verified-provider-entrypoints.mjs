@@ -12,11 +12,16 @@ export const verifiedProviderEntrypoints = Object.freeze([
     name: "acpx-runtime-sidecar",
     source: resolve(packageRoot, "src/cli/acpx-runtime-sidecar.ts"),
     output: resolve(packageRoot, "dist/cli/acpx-runtime-sidecar.js"),
+    verifiedOutput: resolve(packageRoot, "dist/cli/acpx-runtime-sidecar.cjs"),
   }),
   Object.freeze({
     name: "opencode-app-server-proxy",
     source: resolve(packageRoot, "src/cli/opencode-app-server-proxy.ts"),
     output: resolve(packageRoot, "dist/cli/opencode-app-server-proxy.js"),
+    verifiedOutput: resolve(
+      packageRoot,
+      "dist/cli/opencode-app-server-proxy.cjs",
+    ),
   }),
 ]);
 
@@ -47,27 +52,35 @@ function assertSelfContainedBundle(entrypoint, result) {
 export async function bundleVerifiedProviderEntrypoints({ write = true } = {}) {
   const results = [];
   for (const entrypoint of verifiedProviderEntrypoints) {
-    const result = await build({
-      entryPoints: [entrypoint.source],
-      outfile: entrypoint.output,
-      bundle: true,
-      platform: "node",
-      format: "esm",
-      target: "node24",
-      packages: "bundle",
-      splitting: false,
-      sourcemap: false,
-      legalComments: "none",
-      metafile: true,
-      treeShaking: true,
-      write,
-      logLevel: "silent",
-    });
-    assertSelfContainedBundle(entrypoint, result);
+    const buildBundle = async (outfile, format) => {
+      const result = await build({
+        entryPoints: [entrypoint.source],
+        outfile,
+        bundle: true,
+        platform: "node",
+        format,
+        target: "node24",
+        packages: "bundle",
+        splitting: false,
+        sourcemap: false,
+        legalComments: "none",
+        metafile: true,
+        treeShaking: true,
+        write,
+        logLevel: "silent",
+      });
+      assertSelfContainedBundle(entrypoint, result);
+      return result;
+    };
+    const result = await buildBundle(entrypoint.output, "esm");
+    const verifiedResult = await buildBundle(entrypoint.verifiedOutput, "cjs");
     if (write && process.platform !== "win32") {
-      await chmod(entrypoint.output, 0o755);
+      await Promise.all([
+        chmod(entrypoint.output, 0o755),
+        chmod(entrypoint.verifiedOutput, 0o755),
+      ]);
     }
-    results.push({ entrypoint, result });
+    results.push({ entrypoint, result, verifiedResult });
   }
   return results;
 }

@@ -250,11 +250,11 @@ describe("remote provider pack manifest", () => {
     const opencodeCommand = "#!/bin/sh\n";
     const opencodeExecutable = "opencode-binary\n";
     await writeFile(
-      join(root, "dist", "cli", "opencode-app-server-proxy.js"),
+      join(root, "dist", "cli", "opencode-app-server-proxy.cjs"),
       proxy,
     );
     await writeFile(
-      join(root, "dist", "cli", "acpx-runtime-sidecar.js"),
+      join(root, "dist", "cli", "acpx-runtime-sidecar.cjs"),
       sidecar,
     );
     await writeFile(join(root, "node_modules", "node", "bin", "node"), node);
@@ -305,11 +305,11 @@ describe("remote provider pack manifest", () => {
           sha256: digest(opencodeExecutable),
         },
         opencodeProxy: {
-          path: "dist/cli/opencode-app-server-proxy.js",
+          path: "dist/cli/opencode-app-server-proxy.cjs",
           sha256: proxySha,
         },
         acpxSidecar: {
-          path: "dist/cli/acpx-runtime-sidecar.js",
+          path: "dist/cli/acpx-runtime-sidecar.cjs",
           sha256: sidecarSha,
         },
       },
@@ -352,14 +352,14 @@ describe("remote provider pack manifest", () => {
     }
     await writeManifest();
     await writeFile(
-      join(root, "dist", "cli", "opencode-app-server-proxy.js"),
+      join(root, "dist", "cli", "opencode-app-server-proxy.cjs"),
       "tampered\n",
     );
     expect(() => readRemoteProviderPackManifest(root)).toThrow(
       "OpenCode proxy digest mismatch",
     );
     await writeFile(
-      join(root, "dist", "cli", "opencode-app-server-proxy.js"),
+      join(root, "dist", "cli", "opencode-app-server-proxy.cjs"),
       proxy,
     );
     await writeFile(
