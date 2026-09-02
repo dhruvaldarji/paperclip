@@ -68,12 +68,17 @@ export async function bundleVerifiedProviderEntrypoints({ write = true } = {}) {
         treeShaking: true,
         write,
         logLevel: "silent",
+        banner:
+          format === "cjs"
+            ? {
+                js: 'const __paperclipVerifiedEntrypointUrl = require("node:url").pathToFileURL(__filename).href;',
+              }
+            : undefined,
         define:
           format === "cjs"
             ? {
                 "import.meta.dirname": "__dirname",
-                "import.meta.url":
-                  'require("node:url").pathToFileURL(__filename).href',
+                "import.meta.url": "__paperclipVerifiedEntrypointUrl",
               }
             : undefined,
       });
