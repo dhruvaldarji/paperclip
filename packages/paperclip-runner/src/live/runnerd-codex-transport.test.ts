@@ -33,6 +33,7 @@ import {
 import { releaseMaterializedNativeRuntimeSkills } from "../drivers/runtime-context-materializer.js";
 
 import {
+  authorizedToolSetForProvider,
   createCapabilityRunnerdCodexTransport,
   createCapabilityRunnerdProviderEnvironment,
   defaultCapabilityRunnerdBinary,
@@ -53,6 +54,28 @@ import {
   unwrapRunnerdProviderNotifications,
   withCodexCollaborationRuntimeInstructions,
 } from "./runnerd-codex-transport.js";
+
+it("keeps ACPX terminal tools under the reserved runner-owned catalog", () => {
+  const tools = [
+    {
+      name: "get_task_context",
+      description: "Read the task context.",
+      inputSchema: { type: "object" },
+    },
+    ...codexSemanticToolSpecs(),
+  ];
+
+  expect(authorizedToolSetForProvider("acpx", tools)).toMatchObject({
+    operations: [{ operationId: "get_task_context" }],
+  });
+  expect(authorizedToolSetForProvider("codex", tools)).toMatchObject({
+    operations: [
+      { operationId: "get_task_context" },
+      { operationId: "paperclip_block" },
+      { operationId: "paperclip_finish" },
+    ],
+  });
+});
 
 it("defaults runnerd ACPX permissions to approve reads", () => {
   expect(resolveRunnerdAcpxPermissionMode(undefined)).toBe("approve-reads");

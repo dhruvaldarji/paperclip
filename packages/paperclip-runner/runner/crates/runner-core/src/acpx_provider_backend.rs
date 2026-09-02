@@ -23,7 +23,9 @@ use crate::durable::{
     AcpxLaunchProfile, Command, CommandExecution, CommandExecutor, DurableRunnerConfig,
     DurableRunnerError, EventPriority, PolledEvent,
 };
-use crate::process_supervisor::{VerifiedProcessArgument, VerifiedProcessLaunch};
+use crate::process_supervisor::{
+    VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
+};
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
 };
@@ -210,7 +212,7 @@ impl AcpxProviderDescriptor {
                     "ACPX runner launch profile does not authenticate its command",
                 )
             })?;
-        let verified_args = launch_profile
+        let mut verified_args = launch_profile
             .args
             .iter()
             .map(|argument| {
@@ -229,6 +231,15 @@ impl AcpxProviderDescriptor {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Verified scripts are exposed to Node through an immutable descriptor
+        // path (for example /proc/self/fd/12), which intentionally has no .js
+        // suffix. Pin ESM interpretation so Node does not misclassify the
+        // bundled sidecar as CommonJS merely because its verified path is
+        // extensionless.
+        verified_args.insert(
+            0,
+            VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
+        );
         Ok(AcpxSidecarTransportConfig {
             command: launch_profile.command.clone(),
             args: launch_profile.args.clone(),
@@ -1416,7 +1427,16 @@ mod tests {
         let transport = descriptor.verified_transport(Some(&profile)).unwrap();
         assert_eq!(transport.command, profile.command);
         assert_eq!(transport.args[0], sidecar.to_string_lossy());
-        assert!(transport.verified_launch.is_some());
+        let verified_launch = transport.verified_launch.as_ref().unwrap();
+        assert!(matches!(
+            verified_launch.arguments().first(),
+            Some(VerifiedProcessArgument::Literal(argument))
+                if argument == VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG
+        ));
+        assert!(matches!(
+            verified_launch.arguments().get(1),
+            Some(VerifiedProcessArgument::Artifact(_))
+        ));
 
         let mut drifted_path = descriptor.clone();
         drifted_path.sidecar_command = directory.join("other-node");

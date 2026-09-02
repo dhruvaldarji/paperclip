@@ -1266,6 +1266,24 @@ function authorizedToolSet(
   };
 }
 
+const ACPX_RESERVED_TERMINAL_TOOLS = new Set([
+  "paperclip_finish",
+  "paperclip_block",
+]);
+
+export function authorizedToolSetForProvider(
+  provider: CapabilityRunnerdCodexTransportOptions["provider"],
+  tools: readonly Readonly<Record<string, unknown>>[],
+): Record<string, unknown> {
+  return authorizedToolSet(
+    provider === "acpx"
+      ? tools.filter(
+          (tool) => !ACPX_RESERVED_TERMINAL_TOOLS.has(String(tool.name ?? "")),
+        )
+      : tools,
+  );
+}
+
 /**
  * Raw provider tracing is consumed by runnerd itself. The provider child still
  * receives the narrower allowlist enforced by Rust's `SupervisedProcess`, so
@@ -1525,7 +1543,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       options.stateDirectory ??
       mkdtempSync(resolve(tmpdir(), "paperclip-runner-lab-prp-"));
     if (options.resumeDynamicTools !== undefined) {
-      this.#authorizedTools = authorizedToolSet([
+      this.#authorizedTools = authorizedToolSetForProvider(options.provider, [
         ...options.resumeDynamicTools,
         ...codexSemanticToolSpecs(),
       ]);
@@ -2152,7 +2170,10 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         );
       }
     }
-    this.#authorizedTools = authorizedToolSet(dynamicTools);
+    this.#authorizedTools = authorizedToolSetForProvider(
+      provider,
+      dynamicTools,
+    );
     const acpxAgent =
       provider === "acpx" ? (this.options.acpxAgent ?? "codex") : null;
     const requestedModel = typeof params.model === "string" ? params.model : "";

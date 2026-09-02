@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::local_runner::LocalRunnerError;
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
+pub(crate) const VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG: &str = "--experimental-default-type=module";
 
 #[derive(Clone, Debug)]
 pub struct VerifiedProcessArtifact {
@@ -197,6 +198,11 @@ pub struct VerifiedProcessLaunch {
 impl VerifiedProcessLaunch {
     pub fn new(program: VerifiedProcessArtifact, args: Vec<VerifiedProcessArgument>) -> Self {
         Self { program, args }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arguments(&self) -> &[VerifiedProcessArgument] {
+        &self.args
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

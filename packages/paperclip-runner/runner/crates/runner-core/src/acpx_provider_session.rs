@@ -825,6 +825,15 @@ fn validate_reserved_terminal_value(
 }
 
 fn reserved_terminal_tool_bridge() -> Result<ProviderToolBridge, LocalRunnerError> {
+    let tool_set = reserved_terminal_tool_set()?;
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tool_set).map_err(|error| {
+        LocalRunnerError::invalid(format!("ACPX reserved terminal tools are invalid: {error}"))
+    })?;
+    Ok(bridge)
+}
+
+fn reserved_terminal_tool_set() -> Result<AuthorizedToolSet, LocalRunnerError> {
     let result_schema: Value = serde_json::from_str(include_str!(
         "../../../../protocol/schemas/result.schema.json"
     ))
@@ -848,18 +857,20 @@ fn reserved_terminal_tool_bridge() -> Result<ProviderToolBridge, LocalRunnerErro
     let catalog_digest = authorized_tool_catalog_digest(&operations).map_err(|error| {
         LocalRunnerError::invalid(format!("ACPX reserved terminal tools are invalid: {error}"))
     })?;
-    let mut bridge = ProviderToolBridge::default();
-    bridge
-        .prepare(AuthorizedToolSet {
-            schema: TOOL_SET_SCHEMA.to_owned(),
-            schema_version: 1,
-            catalog_digest,
-            operations,
-        })
-        .map_err(|error| {
-            LocalRunnerError::invalid(format!("ACPX reserved terminal tools are invalid: {error}"))
-        })?;
-    Ok(bridge)
+    Ok(AuthorizedToolSet {
+        schema: TOOL_SET_SCHEMA.to_owned(),
+        schema_version: 1,
+        catalog_digest,
+        operations,
+    })
+}
+
+fn sidecar_tool_operations(
+    run_tool_set: &AuthorizedToolSet,
+) -> Result<Vec<AuthorizedTool>, LocalRunnerError> {
+    let mut operations = run_tool_set.operations.clone();
+    operations.extend(reserved_terminal_tool_set()?.operations);
+    Ok(operations)
 }
 
 fn validate_prp_run_result(value: &Value) -> Result<(), LocalRunnerError> {
@@ -891,6 +902,7 @@ fn bootstrap(
     transport: &mut AcpxSidecarTransport,
     config: &AcpxProviderSessionConfig,
 ) -> Result<(AcpxProviderSessionIdentity, AcpxProviderState), LocalRunnerError> {
+    let sidecar_tools = sidecar_tool_operations(&config.tool_set)?;
     let initialized = transport.request(
         GeneratedAcpxSidecarCommand::Initialize,
         json!({"agent": config.agent, "model": config.model}),
@@ -909,7 +921,7 @@ fn bootstrap(
             "permissionModePinned": config.permission_mode_pinned,
             "systemInstructions": config.system_instructions,
             "runtimeContext": Value::Null,
-            "tools": config.tool_set.operations,
+            "tools": &sidecar_tools,
             "expectedIdentity": config.expected_identity,
         }),
     )?;
@@ -920,7 +932,7 @@ fn bootstrap(
         json!({
             "runId": config.run_id,
             "catalogRevision": config.catalog_revision,
-            "tools": config.tool_set.operations,
+            "tools": &sidecar_tools,
         }),
     )?;
     if attached.get("runId").and_then(Value::as_str) != Some(config.run_id.as_str())
@@ -1117,5 +1129,43 @@ fn with_cleanup_error(
         Err(cleanup) => LocalRunnerError::invalid(format!(
             "{error}; ACPX sidecar cleanup also failed: {cleanup}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_catalog_combines_run_tools_with_trusted_terminal_tools() {
+        let operations = vec![AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Read the task context.".to_owned(),
+            input_schema: json!({"type":"object"}),
+            response_schema: json!({"type":"object"}),
+        }];
+        let run_tool_set = AuthorizedToolSet {
+            schema: TOOL_SET_SCHEMA.to_owned(),
+            schema_version: 1,
+            catalog_digest: authorized_tool_catalog_digest(&operations).unwrap(),
+            operations,
+        };
+
+        let sidecar_tools = sidecar_tool_operations(&run_tool_set).unwrap();
+        assert_eq!(
+            sidecar_tools
+                .iter()
+                .map(|tool| tool.operation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "get_task_context",
+                PRP_COMPLETION_TOOL_NAME,
+                PRP_BLOCK_TOOL_NAME,
+            ]
+        );
+        assert_eq!(run_tool_set.operations.len(), 1);
+        assert!(sidecar_tools[1].input_schema.is_object());
+        assert!(sidecar_tools[2].input_schema.is_object());
     }
 }
