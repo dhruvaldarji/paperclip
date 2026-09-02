@@ -13,7 +13,11 @@ import {
   parseLocalProcessFilesystemScope,
   parseLocalProcessNetworkScope,
 } from "@paperclipai/adapter-utils/local-process-sandbox";
-import { assertManagedCredentialHome, inferOpenAiCompatibleBiller } from "@paperclipai/adapter-utils";
+import {
+  assertManagedCredentialHome,
+  inferOpenAiCompatibleBiller,
+  ManagedCredentialHomeRejectedError,
+} from "@paperclipai/adapter-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   readAdapterExecutionTarget,
@@ -223,7 +227,10 @@ async function prepareCodexRemoteManagedHome(
               companyId,
               candidateDir: effectiveCodexHome,
             });
-          } catch {
+          } catch (error) {
+            if (!(error instanceof ManagedCredentialHomeRejectedError)) {
+              throw error;
+            }
             await onLog(
               "stderr",
               "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).\n",

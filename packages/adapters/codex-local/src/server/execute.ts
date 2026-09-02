@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
   assertManagedCredentialHome,
   inferOpenAiCompatibleBiller,
+  ManagedCredentialHomeRejectedError,
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
@@ -844,7 +845,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                       companyId: agent.companyId,
                       candidateDir: effectiveCodexHome,
                     });
-                  } catch {
+                  } catch (error) {
+                    if (!(error instanceof ManagedCredentialHomeRejectedError)) {
+                      throw error;
+                    }
                     await onLog(
                       "stderr",
                       "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).\n",
