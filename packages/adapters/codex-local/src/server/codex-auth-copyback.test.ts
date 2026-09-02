@@ -1,7 +1,7 @@
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
@@ -10,6 +10,29 @@ import {
   resolveCodexAuthCacheEntryPath,
 } from "./codex-auth-cache.js";
 import { resolveSharedCodexHomeDir } from "./codex-home.js";
+
+// One-shot hook run from inside the mocked `open` below, right before the
+// real `open` call it wraps. A test arms this to swap a directory for a
+// symbolic link at the exact instant the copy-back's own next `open` call
+// runs — the narrowest point a directory-swap race could land. `null` by
+// default, so every other test in this file runs against the real `open`
+// unchanged.
+let onFirstOpenCall: (() => Promise<void>) | null = null;
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      if (onFirstOpenCall) {
+        const hook = onFirstOpenCall;
+        onFirstOpenCall = null;
+        await hook();
+      }
+      return actual.open(...args);
+    },
+  };
+});
 
 // The copy-back module reuses the exact same direction-agnostic decision
 // predicate (`codex-auth-merge-decision.cjs`) that the inbound extract path
@@ -729,5 +752,88 @@ describe("copyBackCodexAuth companyId containment re-check", () => {
     ).rejects.toThrow(/Invalid PAPERCLIP_INSTANCE_ID/);
 
     expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+  });
+});
+
+// Between the lock-time re-check and the write, a local attacker who can
+// rename entries under the target's own parent could swap the target
+// directory for a symbolic link. This suite proves the copy-back closes that
+// window: it swaps the directory for a link to an OUTSIDE, attacker-chosen
+// directory at the earliest point the copy-back's own next filesystem call
+// runs, then asserts nothing ever lands in that outside directory.
+describe("copyBackCodexAuth directory-swap-to-symlink protection", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    onFirstOpenCall = null;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const NEWER = "2026-07-09T02:00:00Z";
+  const OLDER = "2026-07-09T01:00:00Z";
+
+  it("does not write into a directory swapped to a symbolic link right after the lock-time re-check", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-swap-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-outside-"));
+    cleanupDirs.push(outsideDir);
+    // A usable, OLDER same-account decoy at the attacker's target: with a
+    // real destination in place the decision predicate would pick "use
+    // source" (the sandbox copy below is newer), so an unpinned write would
+    // overwrite this decoy with the sandbox credential — the clearest,
+    // byte-level proof of a leaked write, not just an early return.
+    const outsideAuthPath = path.join(outsideDir, "auth.json");
+    const decoyAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "outside-decoy" });
+    await writeFile(outsideAuthPath, decoyAuth, { mode: 0o600 });
+
+    // Fires right before the copy-back's own first `open` call, which is the
+    // directory-pin open: swap the real `hostDir` for a symbolic link to
+    // `outsideDir` at that exact instant.
+    onFirstOpenCall = async () => {
+      await rm(hostDir, { recursive: true, force: true });
+      await symlink(outsideDir, hostDir);
+    };
+
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    const logs: string[] = [];
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      log: (line) => {
+        logs.push(line);
+      },
+    });
+
+    expect(outcome).toBe("kept-host");
+    // The decoy at the attacker's target is untouched — the copy-back never
+    // wrote through the swapped symbolic link.
+    expect(await readFile(outsideAuthPath, "utf8")).toBe(decoyAuth);
+    expect(await readdir(outsideDir)).toEqual(["auth.json"]);
+    expect(logs).toEqual([
+      "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
+    ]);
   });
 });

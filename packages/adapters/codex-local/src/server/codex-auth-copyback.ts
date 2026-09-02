@@ -1,5 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -92,26 +93,29 @@ export interface CopyBackCodexAuthInput {
  *      boundary, so this step is skipped.
  *   3. Inside the lock, re-verify a THIRD time against the real path
  *      `withDirectoryMergeLock` itself just resolved (`fs.realpath` on
- *      `hostDir`, taken at lock-acquisition time) and use that real path —
- *      not the literal `hostDir` — for every write below. This closes the
- *      gap the second check leaves open: the `mkdir` call and the lock
- *      acquisition wait both still await, and either can straddle a
- *      symbolic-link swap; re-checking against a path resolved at the
- *      instant the lock was acquired, with no further `await` before it is
- *      used, is the narrowest window the standard library allows. Every one
- *      of the three checks treats only a containment rejection as benign: it
- *      writes no file, emits one warning line, and resolves to `kept-host`
- *      exactly like the sandbox-read ENOENT case above. Every other error —
- *      a permission fault, an unexpected read fault — stays fail-loud.
- *   4. Stage the bytes to a `0600` temp file on the **same filesystem** as
- *      the host target (its directory), which doubles as the predicate
- *      `source`. The open uses `O_EXCL` so it fails instead of following or
+ *      `hostDir`, taken at lock-acquisition time). Immediately after — with
+ *      no further `await` in between — open that real directory with
+ *      `O_DIRECTORY | O_NOFOLLOW` and pin it behind the returned file
+ *      descriptor. This single open call is itself a fourth, atomic
+ *      re-check: it fails outright instead of opening a symbolic link, so a
+ *      swap in the gap the third check cannot see (between that check
+ *      returning and this open running) is still caught. Every write below
+ *      then resolves through this descriptor's `/proc/self/fd/<fd>` alias,
+ *      never through the plain directory path string again, so a LATER swap
+ *      of that string cannot redirect a write the way it could when a write
+ *      only ever re-used a path already re-walked from the root. `/proc` is
+ *      Linux-only, so this step also fails closed — `kept-host`, no write —
+ *      on any other platform, exactly like a containment rejection.
+ *   4. Stage the bytes to a `0600` temp file inside the pinned directory
+ *      (same filesystem as the host target, which doubles as the predicate
+ *      `source`). The open uses `O_EXCL` so it fails instead of following or
  *      overwriting an existing entry, and `O_NOFOLLOW` so it refuses outright
  *      if the temp name is (or became) a symbolic link.
  *   5. Run the newer-wins decision predicate (`source` = sandbox temp,
  *      `destination` = host). Exit 10 → adopt the sandbox copy; exit 20 →
  *      keep the host copy.
- *   6. On exit 10, `rename` the staged temp over the host target. `rename`
+ *   6. On exit 10, `rename` the staged temp over the host target, both
+ *      addressed through the pinned directory's descriptor alias. `rename`
  *      never follows a destination symbolic link — it replaces the link
  *      entry itself — so even a `hostAuthPath` swapped to a symbolic link in
  *      this window is overwritten in place, never written through. This is
@@ -121,12 +125,14 @@ export interface CopyBackCodexAuthInput {
  * finally cleans it up otherwise), so a failure never leaves a partial file.
  * Never logs token bytes — only the decision outcome.
  *
- * Residual risk: Node.js exposes no `openat`, `mkdirat`, or `renameat`, so
- * step 3's re-verification and step 4's `open` are still two separate calls,
- * not one atomic, directory-file-descriptor-pinned operation. A mutable
- * ancestor rebound in that specific gap — after the lock-time `realpath`,
- * before `open` — is not caught. This is the strongest containment the
- * standard library supports without a native dependency.
+ * The decision predicate (step 5) still reads its two files by plain path,
+ * not through the pinned descriptor: it runs in a separate `node` child
+ * process, and a file descriptor pinned in this process is not addressable
+ * from that child's own `/proc/self/fd`. That read is comparison-only — it
+ * can at most skew which side the predicate picks, never place attacker
+ * bytes anywhere — so the descriptor pin is reserved for the two operations
+ * that actually write: the temp-file create in step 4 and the `rename` in
+ * step 6.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
   const { readSandboxAuth, hostAuthPath, companyId, log, resolveCacheEntryPath, env } = input;
@@ -200,50 +206,96 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         }
       }
 
-      const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
-
-      // Stage on the same filesystem as the host target so both the predicate read
-      // and the final rename stay device-local (rename across devices is not
-      // atomic and would fail with EXDEV).
-      const stagedTempPath = path.join(
-        canonicalHostDir,
-        `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`,
-      );
-      // `O_CREAT | O_EXCL` creates the temp private and fails instead of
-      // following or overwriting an existing entry; `O_NOFOLLOW` additionally
-      // refuses outright if that entry is a symbolic link.
-      const handle = await open(
-        stagedTempPath,
-        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-        0o600,
-      );
-      try {
-        await handle.writeFile(sandboxAuthBytes);
-        await handle.close();
-
-        const decision = await decideCodexAuthMerge(stagedTempPath, canonicalHostAuthPath, {
-          errorLabel: "codex auth copy-back",
-        });
-        if (decision === USE_SOURCE_EXIT) {
-          // Atomic same-directory swap; rename preserves the temp's 0600 mode.
-          await rename(stagedTempPath, canonicalHostAuthPath);
-          await log(
-            "[paperclip] Codex auth copy-back: sandbox credential is strictly newer for the same subscription identity; installed to the host at mode 0600.",
-          );
-          return "copied";
-        }
-
-        await log(
-          "[paperclip] Codex auth copy-back: host credential kept (sandbox copy is not a strictly-newer same-identity subscription credential).",
-        );
+      // Pin `canonicalHostDir` behind a file descriptor, immediately, with no
+      // further `await` before it is used. `O_DIRECTORY | O_NOFOLLOW` makes
+      // this open call a fourth, atomic re-check: it fails with `ELOOP` or
+      // `ENOTDIR` instead of opening a symbolic link or a non-directory, so a
+      // swap that lands in the gap the check above cannot see is still
+      // caught here. Every write below resolves through this descriptor's
+      // `/proc/self/fd/<fd>` alias, not the plain `canonicalHostDir` text
+      // used until now, so a swap of that text AFTER this point can no
+      // longer redirect a write. `/proc` is Linux-only: on another platform,
+      // atomic containment cannot be guaranteed, so this fails closed the
+      // same way a containment rejection does, before any byte is staged.
+      if (process.platform !== "linux") {
+        await log(skippedOutsideTreeLog);
         return "kept-host";
+      }
+      let pinnedDir: FileHandle;
+      try {
+        pinnedDir = await open(
+          canonicalHostDir,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code !== "ELOOP" && code !== "ENOTDIR") {
+          throw error;
+        }
+        await log(skippedOutsideTreeLog);
+        return "kept-host";
+      }
+      const pinnedDirPath = `/proc/self/fd/${pinnedDir.fd}`;
+
+      try {
+        const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
+
+        // Stage on the same filesystem as the host target so both the predicate read
+        // and the final rename stay device-local (rename across devices is not
+        // atomic and would fail with EXDEV). Both the create below and the rename
+        // that follows address the file through the pinned directory descriptor,
+        // never through the plain `canonicalHostDir` text.
+        const tempFileName = `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`;
+        const stagedTempPath = path.join(canonicalHostDir, tempFileName);
+        const pinnedStagedTempPath = path.join(pinnedDirPath, tempFileName);
+        const pinnedHostAuthPath = path.join(pinnedDirPath, hostAuthFileName);
+
+        // `O_CREAT | O_EXCL` creates the temp private and fails instead of
+        // following or overwriting an existing entry; `O_NOFOLLOW` additionally
+        // refuses outright if that entry is a symbolic link.
+        const handle = await open(
+          pinnedStagedTempPath,
+          fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+          0o600,
+        );
+        try {
+          await handle.writeFile(sandboxAuthBytes);
+          await handle.close();
+
+          // The decision predicate runs in a separate `node` child process, so
+          // it cannot address a descriptor pinned in this process — it reads
+          // both files by plain path. That read only feeds a comparison; it
+          // can skew which side the predicate picks but never places
+          // attacker-controlled bytes anywhere, so the descriptor pin above is
+          // reserved for the create and the rename below, the two operations
+          // that actually write.
+          const decision = await decideCodexAuthMerge(stagedTempPath, canonicalHostAuthPath, {
+            errorLabel: "codex auth copy-back",
+          });
+          if (decision === USE_SOURCE_EXIT) {
+            // Atomic same-directory swap through the pinned descriptor; rename
+            // preserves the temp's 0600 mode.
+            await rename(pinnedStagedTempPath, pinnedHostAuthPath);
+            await log(
+              "[paperclip] Codex auth copy-back: sandbox credential is strictly newer for the same subscription identity; installed to the host at mode 0600.",
+            );
+            return "copied";
+          }
+
+          await log(
+            "[paperclip] Codex auth copy-back: host credential kept (sandbox copy is not a strictly-newer same-identity subscription credential).",
+          );
+          return "kept-host";
+        } finally {
+          // Close is idempotent-safe to skip after an explicit close; the temp is the
+          // thing that must never linger. On the copy path rename already consumed it
+          // (force makes the removal a no-op); on every other path this deletes the
+          // staged credential bytes.
+          await handle.close().catch(() => undefined);
+          await rm(pinnedStagedTempPath, { force: true }).catch(() => undefined);
+        }
       } finally {
-        // Close is idempotent-safe to skip after an explicit close; the temp is the
-        // thing that must never linger. On the copy path rename already consumed it
-        // (force makes the removal a no-op); on every other path this deletes the
-        // staged credential bytes.
-        await handle.close().catch(() => undefined);
-        await rm(stagedTempPath, { force: true }).catch(() => undefined);
+        await pinnedDir.close().catch(() => undefined);
       }
     },
     env,
