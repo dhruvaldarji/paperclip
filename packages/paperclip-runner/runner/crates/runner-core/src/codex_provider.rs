@@ -15,8 +15,9 @@ use crate::durable::QualifiedLaunchArtifact;
 use crate::durable::{redact_text, OpenCodeLaunchProfile};
 use crate::local_runner::LocalRunnerError;
 use crate::process_supervisor::{
-    is_node_interpreter, BoundedLogBuffer, ProcessOutput, SupervisedProcess,
-    VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
+    is_node_interpreter, verified_node_esm_loader_arguments, BoundedLogBuffer, ProcessOutput,
+    SupervisedProcess, VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_LOADER,
+    VERIFIED_NODE_EVAL_ARG,
 };
 use crate::provider_bridge::{AuthorizedTool, DurableReplayFilter, ToolResult};
 use crate::provider_events::normalized_codex_terminal_event_type;
@@ -1954,14 +1955,11 @@ fn verified_opencode_launch(
         VerifiedProcessArgument::ExecutableArtifact(executable),
     ];
     if is_node_interpreter(&profile.command.path) {
-        // The immutable verified proxy path is extensionless, so explicitly
-        // retain the ESM semantics of the bundled .js artifact instead of
-        // letting Node infer CommonJS. Qualified non-Node test/provider
-        // commands retain their original argument contract.
-        args.insert(
-            0,
-            VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
-        );
+        // The immutable verified proxy path is extensionless. Load its exact
+        // sealed bytes as an ESM data URL while leaving process.argv[1] bound
+        // to that descriptor, so the proxy retains its ordinary CLI contract.
+        // Qualified non-Node test/provider commands retain their arguments.
+        args.splice(0..0, verified_node_esm_loader_arguments());
     }
     Ok(VerifiedProcessLaunch::new(command, args))
 }
@@ -2711,19 +2709,24 @@ mod tests {
         assert!(matches!(
             launch.arguments().first(),
             Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG
+                if argument == VERIFIED_NODE_EVAL_ARG
         ));
         assert!(matches!(
             launch.arguments().get(1),
-            Some(VerifiedProcessArgument::Artifact(_))
+            Some(VerifiedProcessArgument::Literal(argument))
+                if argument == VERIFIED_NODE_ESM_LOADER
         ));
         assert!(matches!(
             launch.arguments().get(2),
+            Some(VerifiedProcessArgument::Artifact(_))
+        ));
+        assert!(matches!(
+            launch.arguments().get(3),
             Some(VerifiedProcessArgument::Literal(argument))
                 if argument == TRUSTED_OPENCODE_EXECUTABLE_ARG
         ));
         assert!(matches!(
-            launch.arguments().get(3),
+            launch.arguments().get(4),
             Some(VerifiedProcessArgument::ExecutableArtifact(_))
         ));
         fs::remove_dir_all(directory).unwrap();

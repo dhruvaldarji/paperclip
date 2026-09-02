@@ -26,7 +26,8 @@ use sha2::{Digest, Sha256};
 use crate::local_runner::LocalRunnerError;
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
-pub(crate) const VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG: &str = "--experimental-default-type=module";
+pub(crate) const VERIFIED_NODE_EVAL_ARG: &str = "--eval";
+pub(crate) const VERIFIED_NODE_ESM_LOADER: &str = r#"const fs=require("node:fs");const source=fs.readFileSync(process.argv[1]);import("data:text/javascript;base64,"+source.toString("base64")).catch((error)=>{console.error(error instanceof Error?error.message:String(error));process.exitCode=1;});"#;
 
 pub(crate) fn is_node_interpreter(path: &Path) -> bool {
     path.file_name()
@@ -193,6 +194,13 @@ pub enum VerifiedProcessArgument {
     Literal(String),
     Artifact(VerifiedProcessArtifact),
     ExecutableArtifact(VerifiedProcessArtifact),
+}
+
+pub(crate) fn verified_node_esm_loader_arguments() -> [VerifiedProcessArgument; 2] {
+    [
+        VerifiedProcessArgument::Literal(VERIFIED_NODE_EVAL_ARG.to_owned()),
+        VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_LOADER.to_owned()),
+    ]
 }
 
 #[derive(Clone, Debug)]

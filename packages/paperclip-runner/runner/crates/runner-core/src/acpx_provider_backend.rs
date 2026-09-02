@@ -24,8 +24,8 @@ use crate::durable::{
     DurableRunnerError, EventPriority, PolledEvent,
 };
 use crate::process_supervisor::{
-    is_node_interpreter, VerifiedProcessArgument, VerifiedProcessLaunch,
-    VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
+    is_node_interpreter, verified_node_esm_loader_arguments, VerifiedProcessArgument,
+    VerifiedProcessLaunch, VERIFIED_NODE_ESM_LOADER, VERIFIED_NODE_EVAL_ARG,
 };
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
@@ -234,14 +234,10 @@ impl AcpxProviderDescriptor {
             .collect::<Result<Vec<_>, _>>()?;
         // Verified scripts are exposed to Node through an immutable descriptor
         // path (for example /proc/self/fd/12), which intentionally has no .js
-        // suffix. Pin ESM interpretation so Node does not misclassify the
-        // bundled sidecar as CommonJS merely because its verified path is
-        // extensionless.
+        // suffix. A runner-owned eval loader reads that exact sealed descriptor
+        // and imports it as ESM without mutating the qualified launch artifact.
         if is_node_interpreter(&launch_profile.command) {
-            verified_args.insert(
-                0,
-                VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
-            );
+            verified_args.splice(0..0, verified_node_esm_loader_arguments());
         }
         Ok(AcpxSidecarTransportConfig {
             command: launch_profile.command.clone(),
@@ -1434,10 +1430,15 @@ mod tests {
         assert!(matches!(
             verified_launch.arguments().first(),
             Some(VerifiedProcessArgument::Literal(argument))
-                if argument == VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG
+                if argument == VERIFIED_NODE_EVAL_ARG
         ));
         assert!(matches!(
             verified_launch.arguments().get(1),
+            Some(VerifiedProcessArgument::Literal(argument))
+                if argument == VERIFIED_NODE_ESM_LOADER
+        ));
+        assert!(matches!(
+            verified_launch.arguments().get(2),
             Some(VerifiedProcessArgument::Artifact(_))
         ));
 
