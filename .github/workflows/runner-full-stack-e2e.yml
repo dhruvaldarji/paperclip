@@ -333,6 +333,18 @@ jobs:
         if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
         run: pnpm --filter @paperclipai/paperclip-runner build:typescript
 
+      - name: Qualify local provider Node interpreter
+        if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const mode = fs.statSync(process.execPath).mode & 0o777;
+          fs.chmodSync(process.execPath, mode & ~0o022);
+          if ((fs.statSync(process.execPath).mode & 0o022) !== 0) {
+            throw new Error("provider Node interpreter remains group- or world-writable");
+          }
+          NODE
+
       - name: Build native remote provider pack
         if: matrix.environmentId == 'daytona' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
         env:
