@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   assertNoSymlinkInManagedCredentialPath,
+  ManagedCredentialHomeRejectedError,
   resolveManagedCredentialHomeBoundary,
 } from "@paperclipai/adapter-utils";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -87,10 +88,13 @@ export interface CopyBackCodexAuthInput {
  *      can be rebound to a symbolic link in that window, so this function
  *      re-resolves the company boundary and re-walks every existing path
  *      segment with a no-follow `lstat` immediately before it creates
- *      anything. A rejection here writes no file, emits one warning line,
- *      and resolves to `kept-host` exactly like the sandbox-read ENOENT
- *      case above. A caller that omits `companyId` guards its target
- *      through a different, unmanaged boundary, so this step is skipped.
+ *      anything. Only a containment rejection is benign here: it writes no
+ *      file, emits one warning line, and resolves to `kept-host` exactly
+ *      like the sandbox-read ENOENT case above. Every other error from this
+ *      step — a permission fault, an unexpected read fault — stays
+ *      fail-loud, matching the sandbox-read handling above. A caller that
+ *      omits `companyId` guards its target through a different, unmanaged
+ *      boundary, so this step is skipped.
  *   3. Stage the bytes to a `0600` temp file on the **same filesystem** as
  *      the host target (its directory), which doubles as the predicate
  *      `source`. The open uses `O_EXCL` so it fails instead of following or
@@ -143,14 +147,19 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
   // Re-verify right before the write. Do not trust `hostAuthPath` on the
   // strength of a caller's earlier check alone — re-resolve the boundary and
   // re-walk the path with a no-follow `lstat` here, as close to the `mkdir`
-  // below as possible. A caller that omits `companyId` guards its target
-  // through a different, unmanaged boundary, so there is no company
+  // below as possible. Only a containment rejection is a benign "outside the
+  // managed tree" outcome; every other error stays fail-loud, matching the
+  // sandbox-read handling above. A caller that omits `companyId` guards its
+  // target through a different, unmanaged boundary, so there is no company
   // containment to re-check here.
   if (companyId) {
     try {
       const boundary = await resolveManagedCredentialHomeBoundary({ env, companyId });
       await assertNoSymlinkInManagedCredentialPath(boundary, hostDir);
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ManagedCredentialHomeRejectedError)) {
+        throw error;
+      }
       await log(
         "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
       );

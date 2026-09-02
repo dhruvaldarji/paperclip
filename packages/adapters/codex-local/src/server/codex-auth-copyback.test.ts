@@ -615,3 +615,119 @@ describe("copyBackCodexAuth identity-keyed cache write", () => {
     expect(logs.some((line) => line.includes("additive cache write failed (EACCES)"))).toBe(true);
   });
 });
+
+// When a caller passes `companyId`, the copy-back re-verifies the host target's
+// containment inside the company's own directory tree immediately before the
+// write. This suite drives that re-check against a real host tmp filesystem
+// laid out to match the company tree the check expects.
+describe("copyBackCodexAuth companyId containment re-check", () => {
+  const cleanupDirs: string[] = [];
+  const COMPANY_ID = "company-a";
+
+  afterEach(async () => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const NEWER = "2026-07-09T02:00:00Z";
+  const OLDER = "2026-07-09T01:00:00Z";
+
+  async function setUpInstance(): Promise<{ env: NodeJS.ProcessEnv; companyRoot: string }> {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-containment-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const companyRoot = path.join(homeDir, "instances", "default", "companies", COMPANY_ID);
+    await mkdir(companyRoot, { recursive: true });
+    return { env, companyRoot };
+  }
+
+  it("installs on the host when the host path sits inside the company's own tree, exactly as without companyId", async () => {
+    const { env, companyRoot } = await setUpInstance();
+    const hostDir = path.join(companyRoot, "codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-in-tree" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-in-tree" });
+
+    const logs: string[] = [];
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      companyId: COMPANY_ID,
+      log: (line) => {
+        logs.push(line);
+      },
+      env,
+    });
+
+    expect(outcome).toBe("copied");
+    expect(await readFile(hostAuthPath, "utf8")).toBe(sandboxAuth);
+  });
+
+  it("keeps the host, writes nothing, and logs the fixed warning when the host path sits outside the company's tree", async () => {
+    const { env } = await setUpInstance();
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-outside-"));
+    cleanupDirs.push(outsideDir);
+    const hostAuthPath = path.join(outsideDir, "auth.json");
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox-outside" });
+
+    const logs: string[] = [];
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      companyId: COMPANY_ID,
+      log: (line) => {
+        logs.push(line);
+      },
+      env,
+    });
+
+    expect(outcome).toBe("kept-host");
+    expect(await readdir(outsideDir)).toEqual([]);
+    expect(logs).toEqual([
+      "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
+    ]);
+  });
+
+  it("stays fail-loud and does not return kept-host when the re-check fails with an error that is not a containment rejection", async () => {
+    const hostDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-broken-env-"));
+    cleanupDirs.push(hostDir);
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-broken-env" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    // An invalid PAPERCLIP_INSTANCE_ID makes the boundary resolver throw a
+    // plain configuration error before it ever reaches a containment check.
+    const brokenEnv: NodeJS.ProcessEnv = { PAPERCLIP_HOME: hostDir, PAPERCLIP_INSTANCE_ID: "not a valid id" };
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-broken-env" });
+
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        companyId: COMPANY_ID,
+        log: () => {},
+        env: brokenEnv,
+      }),
+    ).rejects.toThrow(/Invalid PAPERCLIP_INSTANCE_ID/);
+
+    expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+  });
+});
