@@ -154,6 +154,45 @@ describe("assertManagedCredentialHome", () => {
     ).rejects.toThrow("outside the company-managed directory tree");
   });
 
+  it("rejects a companies directory that is itself a symbolic link to an external location", async () => {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-managed-credential-home-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const instanceRoot = path.join(homeDir, "instances", "default");
+    await mkdir(instanceRoot, { recursive: true });
+    const externalCompaniesTarget = await mkdtemp(
+      path.join(os.tmpdir(), "paperclip-external-companies-"),
+    );
+    cleanupDirs.push(externalCompaniesTarget);
+    const companyId = "company-a";
+    await mkdir(path.join(externalCompaniesTarget, companyId), { recursive: true });
+    await symlink(externalCompaniesTarget, path.join(instanceRoot, "companies"), "dir");
+
+    await expect(
+      assertManagedCredentialHome({
+        env,
+        companyId,
+        candidateDir: path.join(externalCompaniesTarget, companyId, "codex-home"),
+      }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
+  it("rejects a candidate symlink to another account home inside the same company", async () => {
+    const { env, companyId, companyRoot } = await setUpInstance();
+    const realAccountHome = path.join(companyRoot, "codex-homes", "account-b");
+    await mkdir(realAccountHome, { recursive: true });
+    const candidateDir = path.join(companyRoot, "codex-homes", "account-a");
+    await mkdir(path.dirname(candidateDir), { recursive: true });
+    await symlink(realAccountHome, candidateDir, "dir");
+
+    // Even though the symlink target is still inside the company tree — so
+    // the old resolved-path containment check alone would have accepted it —
+    // the literal candidate itself is a symbolic link and must be rejected.
+    await expect(
+      assertManagedCredentialHome({ env, companyId, candidateDir }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
   it("rejects a symbolic-link swap made after the check, so no token file lands at the swapped-to target", async () => {
     const { env, companyId, companyRoot } = await setUpInstance();
     const candidateDir = path.join(companyRoot, "codex-home");

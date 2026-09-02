@@ -94,8 +94,13 @@ async function resolveRealPathAllowingMissingSegments(candidateDir: string): Pro
  * the company-root segment is caught directly.
  *
  * Rejects with {@link REJECTED_CREDENTIAL_HOME_MESSAGE} when:
- * - `companyId` is empty, is `.` or `..`, or contains a path separator.
+ * - the instance root does not exist.
  * - the `companies` directory does not exist.
+ * - the `companies` directory is a symbolic link, or sits anywhere other
+ *   than `<realInstanceRoot>/companies` once resolved — this stops a
+ *   redirected `companies` entry from being silently adopted as the
+ *   credential-write boundary.
+ * - `companyId` is empty, is `.` or `..`, or contains a path separator.
  * - `<realCompaniesRoot>/<companyId>` is missing, is not a directory, or is
  *   a symbolic link.
  *
@@ -110,12 +115,30 @@ export async function resolveManagedCredentialHomeBoundary(
   const instanceRoot = resolvePaperclipInstanceRootForAdapter({ env });
   const companiesRoot = path.resolve(instanceRoot, "companies");
 
+  let realInstanceRoot: string;
+  try {
+    realInstanceRoot = await fs.realpath(instanceRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") rejectCredentialHome();
+    throw error;
+  }
+
   let realCompaniesRoot: string;
   try {
     realCompaniesRoot = await fs.realpath(companiesRoot);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") rejectCredentialHome();
     throw error;
+  }
+
+  // A symbolic link at (or above) the `companies` segment can redirect
+  // `realCompaniesRoot` to any external location `fs.realpath` is willing to
+  // follow. Require it to land exactly at `<realInstanceRoot>/companies` —
+  // the only location a managed `companies` directory may occupy — so a
+  // redirected companies root is rejected instead of silently adopted as the
+  // credential-write boundary.
+  if (realCompaniesRoot !== path.join(realInstanceRoot, "companies")) {
+    rejectCredentialHome();
   }
 
   if (!isSafePathSegment(input.companyId)) rejectCredentialHome();
@@ -182,13 +205,16 @@ export async function assertNoSymlinkInManagedCredentialPath(
  * directory a copy-back is about to write into, before any file write.
  *
  * Verifies the company boundary with {@link resolveManagedCredentialHomeBoundary},
- * resolves the real path of `candidateDir` only after that boundary passes,
- * requires the candidate to equal the boundary or sit under it, then
- * re-checks every existing segment between them with a no-follow `lstat`
- * through {@link assertNoSymlinkInManagedCredentialPath}. Rejects every
- * other candidate — a path outside the instance root, a path under a
- * different company, a symbolic link anywhere on the chain, and a relative
- * path that escapes with `..` — with the fixed
+ * then walks the ORIGINAL, unresolved `candidateDir` against the literal
+ * boundary text with a no-follow `lstat` through
+ * {@link assertNoSymlinkInManagedCredentialPath}, so a symbolic link
+ * anywhere in the candidate — even one whose target is still inside the
+ * company tree — is rejected before it can be followed. Only then resolves
+ * the real path of `candidateDir`, requires the candidate to equal the
+ * boundary or sit under it, and re-checks every existing segment between
+ * them a second time. Rejects every other candidate — a path outside the
+ * instance root, a path under a different company, a symbolic link anywhere
+ * on the chain, and a relative path that escapes with `..` — with the fixed
  * {@link REJECTED_CREDENTIAL_HOME_MESSAGE}.
  *
  * Returns the resolved, real candidate directory on success. A caller that
@@ -200,6 +226,23 @@ export async function assertManagedCredentialHome(
   input: AssertManagedCredentialHomeInput,
 ): Promise<string> {
   const boundary = await resolveManagedCredentialHomeBoundary(input);
+
+  // Reject a symbolic link anywhere in the ORIGINAL candidate path before any
+  // symlink-following resolution runs. Compare against the LITERAL boundary
+  // text (`<instanceRoot>/companies/<companyId>`, not yet real-pathed) — a
+  // caller always builds a managed candidate directory with that same
+  // literal text, so an honest candidate still passes. The resolution below
+  // calls `fs.realpath`, which follows a symbolic link and adopts its
+  // target — including an in-tree link that points at a different, equally
+  // in-tree location, for example another account's credential home. A
+  // no-follow walk over the ALREADY-RESOLVED path can never see a link the
+  // resolution already followed, so this walk must run first, on the
+  // unresolved path.
+  const env = input.env ?? process.env;
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter({ env });
+  const literalBoundary = path.resolve(instanceRoot, "companies", input.companyId);
+  await assertNoSymlinkInManagedCredentialPath(literalBoundary, path.resolve(input.candidateDir));
+
   const realCandidateDir = await resolveRealPathAllowingMissingSegments(input.candidateDir);
 
   const isContained =
