@@ -347,6 +347,15 @@ jobs:
         if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
         run: pnpm --filter @paperclipai/paperclip-runner build:typescript
 
+      - name: Diagnose sealed ACPX ESM loader
+        if: matrix.environmentId == 'local' && startsWith(matrix.profileId, 'runner-acpx-')
+        run: |
+          request='{"protocolVersion":2,"id":1,"command":"initialize","params":{"agent":"codex","model":"gpt-5.6-sol"}}'
+          loader='const fs=require("node:fs");const source=fs.readFileSync(process.argv[1]);import("data:text/javascript;base64,"+source.toString("base64")).catch((error)=>{console.error(error instanceof Error?error.message:String(error));process.exitCode=1;});'
+          response="$(printf '%s\n' "$request" | timeout 15s node --eval "$loader" packages/paperclip-runner/dist/cli/acpx-runtime-sidecar.js)"
+          printf '%s\n' "$response"
+          test "$(printf '%s' "$response" | node -e 'let value="";process.stdin.on("data",chunk=>value+=chunk).on("end",()=>process.exit(JSON.parse(value).ok===true?0:1))')" = ''
+
       - name: Qualify local provider Node interpreter
         if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
         run: |
