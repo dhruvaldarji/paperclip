@@ -885,7 +885,7 @@ describe("codex_local ACP lane", () => {
     // A managed account home under this company's tree: the copy-back target the
     // run selected via its configured CODEX_HOME.
     const sourceHome = path.join(root, "paperclip-home", "instances", "test", "companies", "company-1", "codex-home");
-    // An unrelated fixed host location: the pre-Phase-4 copy-back target. It
+    // An unrelated fixed host location the copy-back used to target. It
     // must stay untouched now that the copy-back writes to the selected home.
     const unrelatedHostHome = path.join(root, "unrelated-host-home");
     await fs.mkdir(localCwd, { recursive: true });
@@ -955,7 +955,7 @@ describe("codex_local ACP lane", () => {
     // Mode preserved at 0600 by the atomic same-directory rename.
     const mode = (await fs.stat(path.join(sourceHome, "auth.json"))).mode & 0o777;
     expect(mode).toBe(0o600);
-    // The unrelated fixed host location the pre-Phase-4 copy-back used to write
+    // The unrelated fixed host location the copy-back used to write to. It
     // is untouched.
     expect(
       JSON.parse(await fs.readFile(path.join(unrelatedHostHome, "auth.json"), "utf8")).tokens.refresh_token,

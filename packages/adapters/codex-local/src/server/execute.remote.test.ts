@@ -709,7 +709,7 @@ describe("codex remote auth copy-back target selection", () => {
       { mode: 0o600 },
     );
 
-    // A fixed host location the old (Phase 3) copy-back used to target. Stub the
+    // The fixed shared host home the copy-back no longer targets. Stub the
     // OS-level CODEX_HOME so a regression back to that target is observable.
     vi.stubEnv("PAPERCLIP_HOME", paperclipHome);
     vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
