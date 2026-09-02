@@ -37,13 +37,38 @@ export function isControlPlaneGovernedResponseWait(
   if (accepted.length !== 1) return false;
   const envelope = record(accepted[0]?.payload?.prpEvent);
   const result = record(record(envelope.payload).result);
+  const continuation = record(result.continuation);
+  const idempotencyKey = continuation.idempotencyKey;
+  if (
+    typeof idempotencyKey !== "string" ||
+    !idempotencyKey.startsWith("interaction-response:")
+  ) {
+    return false;
+  }
+  const interactionId = idempotencyKey.slice("interaction-response:".length);
+  if (!interactionId) return false;
+  const interactionRef = `interaction:${interactionId}`;
+  const hasEvidence =
+    Array.isArray(result.evidence) &&
+    result.evidence.some((value) => record(value).ref === interactionRef);
+  const hasInteractionArtifact =
+    Array.isArray(result.artifacts) &&
+    result.artifacts.some((value) => {
+      const artifact = record(value);
+      return (
+        artifact.kind === "issue_thread_interaction" &&
+        artifact.ref === interactionRef
+      );
+    });
   return (
     envelope.schema === "paperclip.prp.event.v1" &&
     envelope.eventType === "run.result.accepted" &&
     envelope.sourceKind === "control_plane" &&
     result.schema === "paperclip.run_result.v1" &&
     result.reportedWorkDisposition === "yielded" &&
-    record(result.continuation).kind === "response_wake"
+    continuation.kind === "response_wake" &&
+    hasEvidence &&
+    hasInteractionArtifact
   );
 }
 

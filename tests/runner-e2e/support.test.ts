@@ -314,7 +314,17 @@ describe("runner E2E run observations", () => {
             result: {
               schema: "paperclip.run_result.v1",
               reportedWorkDisposition: "yielded",
-              continuation: { kind: "response_wake" },
+              evidence: [{ ref: "interaction:pending" }],
+              artifacts: [
+                {
+                  kind: "issue_thread_interaction",
+                  ref: "interaction:pending",
+                },
+              ],
+              continuation: {
+                kind: "response_wake",
+                idempotencyKey: "interaction-response:pending",
+              },
             },
           },
         },
@@ -329,6 +339,24 @@ describe("runner E2E run observations", () => {
             prpEvent: {
               ...event.payload.prpEvent,
               sourceKind: "runner",
+            },
+          },
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      isControlPlaneGovernedResponseWait([
+        {
+          ...event,
+          payload: {
+            prpEvent: {
+              ...event.payload.prpEvent,
+              payload: {
+                result: {
+                  ...event.payload.prpEvent.payload.result,
+                  artifacts: [],
+                },
+              },
             },
           },
         },
