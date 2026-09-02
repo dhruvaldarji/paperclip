@@ -27,8 +27,10 @@ import {
 } from "./redaction.js";
 import { parseDarwinSharedMemory } from "./shared-memory.js";
 import {
+  isControlPlaneGovernedResponseWait,
   isNonExecutingReviewFenceRun,
   numberedPlanStepCount,
+  providerSessionContinuityFailures,
 } from "./run-observations.js";
 import { runnerE2EWebServerCommand } from "./web-server-command.js";
 
@@ -298,6 +300,93 @@ describe("runner E2E run observations", () => {
         errorCode: "provider_failure",
       }),
     ).toBe(false);
+  });
+
+  it("recognizes only authoritative control-plane governed response waits", () => {
+    const event = {
+      eventType: "run.result.accepted",
+      payload: {
+        prpEvent: {
+          schema: "paperclip.prp.event.v1",
+          eventType: "run.result.accepted",
+          sourceKind: "control_plane",
+          payload: {
+            result: {
+              schema: "paperclip.run_result.v1",
+              reportedWorkDisposition: "yielded",
+              continuation: { kind: "response_wake" },
+            },
+          },
+        },
+      },
+    };
+    expect(isControlPlaneGovernedResponseWait([event])).toBe(true);
+    expect(
+      isControlPlaneGovernedResponseWait([
+        {
+          ...event,
+          payload: {
+            prpEvent: {
+              ...event.payload.prpEvent,
+              sourceKind: "runner",
+            },
+          },
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      isControlPlaneGovernedResponseWait([
+        event,
+        { ...event, payload: structuredClone(event.payload) },
+      ]),
+    ).toBe(false);
+  });
+
+  it("requires continuity except for an explicit accepted-Plan reset", () => {
+    const initial = {
+      id: "initial",
+      sessionIdBefore: null,
+      sessionIdAfter: "session-one",
+    };
+    const resumed = {
+      id: "resumed",
+      sessionIdBefore: "session-one",
+      sessionIdAfter: "session-one",
+    };
+    const acceptedPlan = {
+      id: "accepted-plan",
+      sessionIdBefore: null,
+      sessionIdAfter: "session-two",
+      contextSnapshot: {
+        forceFreshSession: true,
+        workspaceRefreshReason: "accepted_plan_confirmation",
+        source: "issue.interaction.accept",
+        interactionStatus: "accepted",
+      },
+    };
+    expect(
+      providerSessionContinuityFailures("codex", [
+        initial,
+        resumed,
+        acceptedPlan,
+      ]),
+    ).toEqual([]);
+    expect(
+      providerSessionContinuityFailures("codex", [
+        initial,
+        { ...acceptedPlan, sessionIdAfter: "session-one" },
+      ]),
+    ).toEqual([
+      "expected accepted Plan run accepted-plan to rotate the codex provider session",
+    ]);
+    expect(
+      providerSessionContinuityFailures("codex", [
+        initial,
+        { ...resumed, sessionIdAfter: "session-two" },
+      ]),
+    ).toEqual([
+      "expected codex to preserve its provider session for run resumed",
+    ]);
   });
 });
 

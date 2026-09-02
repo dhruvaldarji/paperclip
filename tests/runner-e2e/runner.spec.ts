@@ -10,8 +10,10 @@ import { runnerE2EServerControlPaths } from "./harness-env.js";
 import { setupLiveFixtures, type LiveFixtureValues } from "./live-fixtures.js";
 import { evaluateMatcher, type MatcherResult } from "./matchers.js";
 import {
+  isControlPlaneGovernedResponseWait,
   isNonExecutingReviewFenceRun,
   numberedPlanStepCount,
+  providerSessionContinuityFailures,
 } from "./run-observations.js";
 import {
   assertSecretFree,
@@ -452,9 +454,12 @@ function nativeRunEventIntegrityFailures(
     }
   }
 
+  const runnerResultCount = runnerEventTypes.filter(
+    (value) => value === "run.result.proposed",
+  ).length;
   if (
-    runnerEventTypes.filter((value) => value === "run.result.proposed")
-      .length !== 1
+    runnerResultCount !== 1 &&
+    !(runnerResultCount === 0 && isControlPlaneGovernedResponseWait(events))
   ) {
     failures.push(
       `run ${run.id} must persist exactly one runner semantic result`,
@@ -1458,17 +1463,12 @@ for (const execution of executions) {
             execution.profile.provider === "opencode") &&
           selectedRuns.length > 1
         ) {
-          const providerSessions = selectedRuns.map(
-            (candidate) => candidate.sessionIdAfter,
+          invariantFailures.push(
+            ...providerSessionContinuityFailures(
+              execution.profile.provider,
+              selectedRuns,
+            ),
           );
-          if (
-            providerSessions.some((sessionId) => !sessionId) ||
-            new Set(providerSessions).size !== 1
-          ) {
-            invariantFailures.push(
-              `expected ${execution.profile.provider} to preserve one provider session across all heartbeat runs`,
-            );
-          }
         } else if (
           execution.profile.provider === "acpx" &&
           selectedRuns.length > 1
