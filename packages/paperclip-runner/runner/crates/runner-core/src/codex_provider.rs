@@ -15,8 +15,8 @@ use crate::durable::QualifiedLaunchArtifact;
 use crate::durable::{redact_text, OpenCodeLaunchProfile};
 use crate::local_runner::LocalRunnerError;
 use crate::process_supervisor::{
-    BoundedLogBuffer, ProcessOutput, SupervisedProcess, VerifiedProcessArgument,
-    VerifiedProcessLaunch, VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
+    is_node_interpreter, BoundedLogBuffer, ProcessOutput, SupervisedProcess,
+    VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
 };
 use crate::provider_bridge::{AuthorizedTool, DurableReplayFilter, ToolResult};
 use crate::provider_events::normalized_codex_terminal_event_type;
@@ -1948,18 +1948,22 @@ fn verified_opencode_launch(
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
     let executable = verify_launch_artifact(&profile.executable, "OpenCode provider executable")
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
-    Ok(VerifiedProcessLaunch::new(
-        command,
-        vec![
-            // The immutable verified proxy path is extensionless, so
-            // explicitly retain the ESM semantics of the bundled .js
-            // artifact instead of letting Node infer CommonJS.
+    let mut args = vec![
+        VerifiedProcessArgument::Artifact(proxy),
+        VerifiedProcessArgument::Literal(TRUSTED_OPENCODE_EXECUTABLE_ARG.to_owned()),
+        VerifiedProcessArgument::ExecutableArtifact(executable),
+    ];
+    if is_node_interpreter(&profile.command.path) {
+        // The immutable verified proxy path is extensionless, so explicitly
+        // retain the ESM semantics of the bundled .js artifact instead of
+        // letting Node infer CommonJS. Qualified non-Node test/provider
+        // commands retain their original argument contract.
+        args.insert(
+            0,
             VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
-            VerifiedProcessArgument::Artifact(proxy),
-            VerifiedProcessArgument::Literal(TRUSTED_OPENCODE_EXECUTABLE_ARG.to_owned()),
-            VerifiedProcessArgument::ExecutableArtifact(executable),
-        ],
-    ))
+        );
+    }
+    Ok(VerifiedProcessLaunch::new(command, args))
 }
 
 fn json_size(value: &Value, label: &str) -> Result<usize, LocalRunnerError> {

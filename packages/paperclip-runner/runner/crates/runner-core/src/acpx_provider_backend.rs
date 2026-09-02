@@ -24,7 +24,8 @@ use crate::durable::{
     DurableRunnerError, EventPriority, PolledEvent,
 };
 use crate::process_supervisor::{
-    VerifiedProcessArgument, VerifiedProcessLaunch, VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
+    is_node_interpreter, VerifiedProcessArgument, VerifiedProcessLaunch,
+    VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG,
 };
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
@@ -236,10 +237,12 @@ impl AcpxProviderDescriptor {
         // suffix. Pin ESM interpretation so Node does not misclassify the
         // bundled sidecar as CommonJS merely because its verified path is
         // extensionless.
-        verified_args.insert(
-            0,
-            VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
-        );
+        if is_node_interpreter(&launch_profile.command) {
+            verified_args.insert(
+                0,
+                VerifiedProcessArgument::Literal(VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG.to_owned()),
+            );
+        }
         Ok(AcpxSidecarTransportConfig {
             command: launch_profile.command.clone(),
             args: launch_profile.args.clone(),

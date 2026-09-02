@@ -28,6 +28,12 @@ use crate::local_runner::LocalRunnerError;
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
 pub(crate) const VERIFIED_NODE_ESM_DEFAULT_TYPE_ARG: &str = "--experimental-default-type=module";
 
+pub(crate) fn is_node_interpreter(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "nodejs" | "node.exe"))
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifiedProcessArtifact {
     display_path: PathBuf,
