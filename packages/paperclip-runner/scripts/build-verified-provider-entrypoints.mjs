@@ -68,6 +68,14 @@ export async function bundleVerifiedProviderEntrypoints({ write = true } = {}) {
         treeShaking: true,
         write,
         logLevel: "silent",
+        define:
+          format === "cjs"
+            ? {
+                "import.meta.dirname": "__dirname",
+                "import.meta.url":
+                  'require("node:url").pathToFileURL(__filename).href',
+              }
+            : undefined,
       });
       assertSelfContainedBundle(entrypoint, result);
       return result;
