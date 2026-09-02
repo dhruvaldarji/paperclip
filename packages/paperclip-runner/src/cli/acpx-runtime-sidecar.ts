@@ -120,6 +120,7 @@ let pendingInput = Promise.resolve();
 let bootstrapFailure: Error | null = null;
 let initializedAgent: QualifiedAcpxAgent | null = null;
 let initializedModel: string | null = null;
+let inputClosed = false;
 const tools = new Map<string, PendingTool>();
 const inputs = new Map<string, PendingInput>();
 
@@ -136,6 +137,7 @@ lines.on("line", (line) => {
   );
 });
 lines.on("close", () => {
+  inputClosed = true;
   requestShutdown("sidecar stdin closed");
 });
 process.once("SIGTERM", () => {
@@ -148,7 +150,7 @@ process.once("SIGINT", () => {
 function requestShutdown(reason: string): void {
   if (shutdownRequested) return;
   shutdownRequested = true;
-  if (!lines.closed) lines.pause();
+  if (!inputClosed) lines.pause();
   pendingInput = enqueueAcpxSidecarInput(
     pendingInput,
     () => shutdown(reason),
