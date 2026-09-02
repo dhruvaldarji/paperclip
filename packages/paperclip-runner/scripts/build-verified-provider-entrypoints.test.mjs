@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stat } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -13,5 +14,18 @@ test("verified JS provider entrypoints bundle into one descriptor-safe file", as
     assert.equal(result.outputFiles?.length, 1, entrypoint.name);
     const source = result.outputFiles[0].text;
     assert.match(source, /^#!\/usr\/bin\/env node\n/);
+  }
+});
+
+test("written provider entrypoints satisfy qualified launch permissions", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX launch permissions do not apply on Windows");
+    return;
+  }
+  await bundleVerifiedProviderEntrypoints();
+  for (const entrypoint of verifiedProviderEntrypoints) {
+    const mode = (await stat(entrypoint.output)).mode;
+    assert.equal(mode & 0o022, 0, entrypoint.name);
+    assert.notEqual(mode & 0o100, 0, entrypoint.name);
   }
 });

@@ -1,3 +1,4 @@
+import { chmod } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -63,6 +64,9 @@ export async function bundleVerifiedProviderEntrypoints({ write = true } = {}) {
       logLevel: "silent",
     });
     assertSelfContainedBundle(entrypoint, result);
+    if (write && process.platform !== "win32") {
+      await chmod(entrypoint.output, 0o755);
+    }
     results.push({ entrypoint, result });
   }
   return results;
