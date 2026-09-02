@@ -148,7 +148,7 @@ process.once("SIGINT", () => {
 function requestShutdown(reason: string): void {
   if (shutdownRequested) return;
   shutdownRequested = true;
-  lines.pause();
+  if (!lines.closed) lines.pause();
   pendingInput = enqueueAcpxSidecarInput(
     pendingInput,
     () => shutdown(reason),
