@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           validation_ref="refs/heads/validation/runner-local-integrity-e2e"
-          validation_ids="core-compatibility.runner-acpx-codex.local.message-marker,core-compatibility.runner-opencode.local.message-marker,local-session-integrity.runner-opencode.local.structured-question-restart-resume,local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume,local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume"
+          validation_ids="core-compatibility.runner-acpx-codex.local.message-marker"
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
             if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ] || [ "${SELECT_ALL:-false}" = true ] || [ "${SELECT_ID:-}" != "$validation_ids" ]; then
               echo "Non-default refs may run only the pinned scoped repair matrix from the validation branch." >&2
