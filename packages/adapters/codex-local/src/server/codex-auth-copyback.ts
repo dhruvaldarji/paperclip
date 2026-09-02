@@ -83,27 +83,35 @@ export interface CopyBackCodexAuthInput {
  *   2. When the caller passes `companyId`, re-verify `hostAuthPath`'s
  *      directory right before the write. A caller validates `hostAuthPath`
  *      before it calls this function, but time passes between that check
- *      and this write — the sandbox read above, the directory-lock wait,
- *      and the decision predicate all await. A mutable ancestor directory
- *      can be rebound to a symbolic link in that window, so this function
- *      re-resolves the company boundary and re-walks every existing path
- *      segment with a no-follow `lstat` immediately before it creates
- *      anything. Only a containment rejection is benign here: it writes no
- *      file, emits one warning line, and resolves to `kept-host` exactly
- *      like the sandbox-read ENOENT case above. Every other error from this
- *      step — a permission fault, an unexpected read fault — stays
- *      fail-loud, matching the sandbox-read handling above. A caller that
- *      omits `companyId` guards its target through a different, unmanaged
+ *      and this write — the sandbox read above and the directory-lock wait
+ *      both await. A mutable ancestor directory can be rebound to a symbolic
+ *      link in that window, so this function re-resolves the company
+ *      boundary and re-walks every existing path segment with a no-follow
+ *      `lstat` immediately before it creates anything. A caller that omits
+ *      `companyId` guards its target through a different, unmanaged
  *      boundary, so this step is skipped.
- *   3. Stage the bytes to a `0600` temp file on the **same filesystem** as
+ *   3. Inside the lock, re-verify a THIRD time against the real path
+ *      `withDirectoryMergeLock` itself just resolved (`fs.realpath` on
+ *      `hostDir`, taken at lock-acquisition time) and use that real path —
+ *      not the literal `hostDir` — for every write below. This closes the
+ *      gap the second check leaves open: the `mkdir` call and the lock
+ *      acquisition wait both still await, and either can straddle a
+ *      symbolic-link swap; re-checking against a path resolved at the
+ *      instant the lock was acquired, with no further `await` before it is
+ *      used, is the narrowest window the standard library allows. Every one
+ *      of the three checks treats only a containment rejection as benign: it
+ *      writes no file, emits one warning line, and resolves to `kept-host`
+ *      exactly like the sandbox-read ENOENT case above. Every other error —
+ *      a permission fault, an unexpected read fault — stays fail-loud.
+ *   4. Stage the bytes to a `0600` temp file on the **same filesystem** as
  *      the host target (its directory), which doubles as the predicate
  *      `source`. The open uses `O_EXCL` so it fails instead of following or
  *      overwriting an existing entry, and `O_NOFOLLOW` so it refuses outright
  *      if the temp name is (or became) a symbolic link.
- *   4. Run the newer-wins decision predicate (`source` = sandbox temp,
+ *   5. Run the newer-wins decision predicate (`source` = sandbox temp,
  *      `destination` = host). Exit 10 → adopt the sandbox copy; exit 20 →
  *      keep the host copy.
- *   5. On exit 10, `rename` the staged temp over the host target. `rename`
+ *   6. On exit 10, `rename` the staged temp over the host target. `rename`
  *      never follows a destination symbolic link — it replaces the link
  *      entry itself — so even a `hostAuthPath` swapped to a symbolic link in
  *      this window is overwritten in place, never written through. This is
@@ -114,11 +122,11 @@ export interface CopyBackCodexAuthInput {
  * Never logs token bytes — only the decision outcome.
  *
  * Residual risk: Node.js exposes no `openat`, `mkdirat`, or `renameat`, so
- * step 2's re-verification and step 3's `mkdir`/`open` are still two
- * separate calls, not one atomic, directory-file-descriptor-pinned
- * operation. A mutable ancestor rebound in that specific gap is not caught.
- * This is the strongest containment the standard library supports without a
- * native dependency.
+ * step 3's re-verification and step 4's `open` are still two separate calls,
+ * not one atomic, directory-file-descriptor-pinned operation. A mutable
+ * ancestor rebound in that specific gap — after the lock-time `realpath`,
+ * before `open` — is not caught. This is the strongest containment the
+ * standard library supports without a native dependency.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
   const { readSandboxAuth, hostAuthPath, companyId, log, resolveCacheEntryPath, env } = input;
@@ -143,6 +151,10 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
   }
 
   const hostDir = path.dirname(hostAuthPath);
+  const hostAuthFileName = path.basename(hostAuthPath);
+
+  const skippedOutsideTreeLog =
+    "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).";
 
   // Re-verify right before the write. Do not trust `hostAuthPath` on the
   // strength of a caller's earlier check alone — re-resolve the boundary and
@@ -152,17 +164,16 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
   // sandbox-read handling above. A caller that omits `companyId` guards its
   // target through a different, unmanaged boundary, so there is no company
   // containment to re-check here.
+  let boundary: string | undefined;
   if (companyId) {
     try {
-      const boundary = await resolveManagedCredentialHomeBoundary({ env, companyId });
+      boundary = await resolveManagedCredentialHomeBoundary({ env, companyId });
       await assertNoSymlinkInManagedCredentialPath(boundary, hostDir);
     } catch (error) {
       if (!(error instanceof ManagedCredentialHomeRejectedError)) {
         throw error;
       }
-      await log(
-        "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
-      );
+      await log(skippedOutsideTreeLog);
       return "kept-host";
     }
   }
@@ -170,11 +181,34 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
   await mkdir(hostDir, { recursive: true });
   const hostOutcome = await withDirectoryMergeLock(
     hostDir,
-    async () => {
+    async (canonicalHostDir) => {
+      // `withDirectoryMergeLock` resolved `hostDir`'s real path to compute
+      // the lock key, at the instant the lock was acquired. Re-verify
+      // against that fresh resolution — not the literal `hostDir` above —
+      // with no `await` in between, and use it for every write below. This
+      // catches a symbolic-link swap that happened during the `mkdir` call
+      // or the lock-acquisition wait, the gap the check above cannot see.
+      if (boundary) {
+        try {
+          await assertNoSymlinkInManagedCredentialPath(boundary, canonicalHostDir);
+        } catch (error) {
+          if (!(error instanceof ManagedCredentialHomeRejectedError)) {
+            throw error;
+          }
+          await log(skippedOutsideTreeLog);
+          return "kept-host";
+        }
+      }
+
+      const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
+
       // Stage on the same filesystem as the host target so both the predicate read
       // and the final rename stay device-local (rename across devices is not
       // atomic and would fail with EXDEV).
-      const stagedTempPath = path.join(hostDir, `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`);
+      const stagedTempPath = path.join(
+        canonicalHostDir,
+        `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`,
+      );
       // `O_CREAT | O_EXCL` creates the temp private and fails instead of
       // following or overwriting an existing entry; `O_NOFOLLOW` additionally
       // refuses outright if that entry is a symbolic link.
@@ -187,12 +221,12 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         await handle.writeFile(sandboxAuthBytes);
         await handle.close();
 
-        const decision = await decideCodexAuthMerge(stagedTempPath, hostAuthPath, {
+        const decision = await decideCodexAuthMerge(stagedTempPath, canonicalHostAuthPath, {
           errorLabel: "codex auth copy-back",
         });
         if (decision === USE_SOURCE_EXIT) {
           // Atomic same-directory swap; rename preserves the temp's 0600 mode.
-          await rename(stagedTempPath, hostAuthPath);
+          await rename(stagedTempPath, canonicalHostAuthPath);
           await log(
             "[paperclip] Codex auth copy-back: sandbox credential is strictly newer for the same subscription identity; installed to the host at mode 0600.",
           );
