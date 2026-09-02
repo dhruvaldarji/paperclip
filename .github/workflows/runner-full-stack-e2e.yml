@@ -350,10 +350,56 @@ jobs:
       - name: Diagnose descriptor-safe ACPX bundle
         if: matrix.environmentId == 'local' && startsWith(matrix.profileId, 'runner-acpx-')
         run: |
-          request='{"protocolVersion":2,"id":1,"command":"initialize","params":{"agent":"codex","model":"gpt-5.6-sol"}}'
-          response="$(printf '%s\n' "$request" | timeout 15s node packages/paperclip-runner/dist/cli/acpx-runtime-sidecar.cjs)"
-          printf '%s\n' "$response"
-          test "$(printf '%s' "$response" | node -e 'let value="";process.stdin.on("data",chunk=>value+=chunk).on("end",()=>process.exit(JSON.parse(value).ok===true?0:1))')" = ''
+          python3 <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          import sys
+
+          def snapshot(path):
+              descriptor = os.memfd_create("paperclip-verified-launch")
+              with open(path, "rb") as source:
+                  while chunk := source.read(64 * 1024):
+                      os.write(descriptor, chunk)
+              os.lseek(descriptor, 0, os.SEEK_SET)
+              os.fchmod(descriptor, 0o500)
+              return descriptor
+
+          node_descriptor = snapshot(shutil.which("node"))
+          sidecar_descriptor = snapshot(
+              "packages/paperclip-runner/dist/cli/acpx-runtime-sidecar.cjs"
+          )
+          environment = os.environ.copy()
+          environment["PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT"] = os.path.abspath(
+              "packages/paperclip-runner"
+          )
+          request = {
+              "protocolVersion": 2,
+              "id": 1,
+              "command": "initialize",
+              "params": {"agent": "codex", "model": "gpt-5.6-sol"},
+          }
+          result = subprocess.run(
+              [
+                  f"/proc/self/fd/{node_descriptor}",
+                  f"/proc/self/fd/{sidecar_descriptor}",
+              ],
+              input=json.dumps(request) + "\n",
+              text=True,
+              capture_output=True,
+              timeout=15,
+              pass_fds=(node_descriptor, sidecar_descriptor),
+              env=environment,
+          )
+          sys.stdout.write(result.stdout)
+          sys.stderr.write(result.stderr)
+          if result.returncode != 0:
+              raise SystemExit(result.returncode)
+          response = json.loads(result.stdout.strip().splitlines()[0])
+          if response.get("ok") is not True:
+              raise SystemExit("descriptor-safe ACPX initialize failed")
+          PY
 
       - name: Qualify local provider Node interpreter
         if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
