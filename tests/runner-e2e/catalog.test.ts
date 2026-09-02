@@ -209,6 +209,15 @@ describe("runner E2E catalog", () => {
     });
     expect(task!.buildPrompt("nonce")).toContain("request_confirmation");
     expect(task!.buildPrompt("nonce")).toContain("baseRevisionId");
+    expect(task!.buildPrompt("nonce")).toContain(
+      "do not spell, quote, repeat, announce, or include PAPERCLIP_E2E_PLAN_DONE_nonce",
+    );
+    expect(task!.buildPrompt("nonce")).toContain(
+      "paperclip_finish with PAPERCLIP_E2E_PLAN_DONE_nonce as its complete summary",
+    );
+    expect(task!.buildPrompt("nonce")).toContain(
+      "one atomic issue PATCH with status `done` and that exact comment",
+    );
     expect(task!.buildRevisionRequest?.("nonce")).toContain("baseRevisionId");
   });
 
