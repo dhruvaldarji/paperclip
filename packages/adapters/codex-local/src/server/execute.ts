@@ -854,6 +854,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                   void (await copyBackCodexAuth({
                     readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
                     hostAuthPath: path.join(guardedCodexHome, "auth.json"),
+                    companyId: agent.companyId,
                     log: (line) => onLog("stdout", `${line}\n`),
                     // Additive cache write (sandbox to host): also cache the
                     // sandbox subscription credential in its per-identity slot,

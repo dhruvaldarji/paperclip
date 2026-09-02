@@ -233,6 +233,7 @@ async function prepareCodexRemoteManagedHome(
           void (await copyBackCodexAuth({
             readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
             hostAuthPath: path.join(guardedCodexHome, "auth.json"),
+            companyId,
             log: (line) => onLog("stdout", `${line}\n`),
             // Additive cache write (sandbox to host): also refresh the sandbox
             // subscription credential's own per-identity slot, keyed by the

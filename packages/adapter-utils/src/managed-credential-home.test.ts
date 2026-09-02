@@ -1,8 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertManagedCredentialHome } from "./managed-credential-home.js";
+import {
+  assertManagedCredentialHome,
+  assertNoSymlinkInManagedCredentialPath,
+} from "./managed-credential-home.js";
 
 describe("assertManagedCredentialHome", () => {
   const cleanupDirs: string[] = [];
@@ -24,6 +27,17 @@ describe("assertManagedCredentialHome", () => {
     const companyRoot = path.join(instanceRoot, "companies", companyId);
     await mkdir(companyRoot, { recursive: true });
     return { env, companyId, companyRoot, instanceRoot };
+  }
+
+  /** Same as {@link setUpInstance}, but leaves the company directory itself unmade, so a test can put a symbolic link there instead. */
+  async function setUpInstanceWithoutCompanyDir() {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-managed-credential-home-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const instanceRoot = path.join(homeDir, "instances", "default");
+    const companiesRoot = path.join(instanceRoot, "companies");
+    await mkdir(companiesRoot, { recursive: true });
+    return { env, instanceRoot, companiesRoot };
   }
 
   it("accepts the company default home", async () => {
@@ -104,5 +118,68 @@ describe("assertManagedCredentialHome", () => {
     await expect(
       assertManagedCredentialHome({ env, companyId, candidateDir: outsideDir }),
     ).rejects.toThrow(/^The credential home is outside the company-managed directory tree\.$/);
+  });
+
+  it("rejects a company-root symbolic link that points at another company's directory", async () => {
+    const { env, companiesRoot } = await setUpInstanceWithoutCompanyDir();
+    const companyId = "company-a";
+    const otherCompanyDir = path.join(companiesRoot, "company-b");
+    await mkdir(otherCompanyDir, { recursive: true });
+    const companyLinkPath = path.join(companiesRoot, companyId);
+    await symlink(otherCompanyDir, companyLinkPath, "dir");
+
+    await expect(
+      assertManagedCredentialHome({
+        env,
+        companyId,
+        candidateDir: path.join(companyLinkPath, "codex-home"),
+      }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
+  it("rejects a company-root symbolic link that points outside the instance tree", async () => {
+    const { env, companiesRoot } = await setUpInstanceWithoutCompanyDir();
+    const companyId = "company-a";
+    const outsideTarget = await mkdtemp(path.join(os.tmpdir(), "paperclip-outside-company-root-"));
+    cleanupDirs.push(outsideTarget);
+    const companyLinkPath = path.join(companiesRoot, companyId);
+    await symlink(outsideTarget, companyLinkPath, "dir");
+
+    await expect(
+      assertManagedCredentialHome({
+        env,
+        companyId,
+        candidateDir: path.join(companyLinkPath, "codex-home"),
+      }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
+  it("rejects a symbolic-link swap made after the check, so no token file lands at the swapped-to target", async () => {
+    const { env, companyId, companyRoot } = await setUpInstance();
+    const candidateDir = path.join(companyRoot, "codex-home");
+    await mkdir(candidateDir, { recursive: true });
+
+    const resolved = await assertManagedCredentialHome({ env, companyId, candidateDir });
+    expect(resolved).toBe(candidateDir);
+
+    // An attacker swaps the checked directory for a symbolic link to an
+    // external target between the check above and a caller's write below.
+    const externalTarget = await mkdtemp(path.join(os.tmpdir(), "paperclip-swap-target-"));
+    cleanupDirs.push(externalTarget);
+    await rm(candidateDir, { recursive: true, force: true });
+    await symlink(externalTarget, candidateDir, "dir");
+
+    // A caller must re-verify with a no-follow check immediately before it
+    // writes. This simulates that contract: the token write only runs when
+    // the re-check passes.
+    async function writeTokenIfStillContained(): Promise<void> {
+      await assertNoSymlinkInManagedCredentialPath(companyRoot, resolved);
+      await writeFile(path.join(resolved, "auth.json"), "token-bytes");
+    }
+
+    await expect(writeTokenIfStillContained()).rejects.toThrow(
+      "outside the company-managed directory tree",
+    );
+    expect(await readdir(externalTarget)).toEqual([]);
   });
 });
