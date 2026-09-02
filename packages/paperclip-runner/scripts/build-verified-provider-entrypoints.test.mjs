@@ -16,6 +16,11 @@ test("provider entrypoints include self-contained ESM and descriptor-safe Common
       const source = bundle.outputFiles[0].text;
       assert.match(source, /^#!\/usr\/bin\/env node\n/);
     }
+    assert.doesNotMatch(
+      verifiedResult.outputFiles[0].text,
+      /\bimport\.meta\b/,
+      entrypoint.name,
+    );
   }
 });
 
