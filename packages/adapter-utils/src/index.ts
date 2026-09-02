@@ -147,6 +147,7 @@ export {
   assertManagedCredentialHome,
   assertNoSymlinkInManagedCredentialPath,
   resolveManagedCredentialHomeBoundary,
+  ManagedCredentialHomeRejectedError,
 } from "./managed-credential-home.js";
 // Keep the root adapter-utils entry browser-safe because the UI imports it.
 // The sandbox callback bridge stays available via its dedicated subpath export.

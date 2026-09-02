@@ -15,8 +15,23 @@ import { resolvePaperclipInstanceRootForAdapter } from "./server-utils.js";
 const REJECTED_CREDENTIAL_HOME_MESSAGE =
   "The credential home is outside the company-managed directory tree.";
 
+/**
+ * Thrown only for a containment rejection: a candidate directory outside the
+ * company-managed tree, under the wrong company, or reached through a
+ * symbolic link. A caller can catch this class alone to treat "not
+ * contained" as benign, and let every other error (a permission fault, an
+ * unexpected read fault) stay fail-loud. The message is fixed text with no
+ * path and no identifier.
+ */
+export class ManagedCredentialHomeRejectedError extends Error {
+  constructor() {
+    super(REJECTED_CREDENTIAL_HOME_MESSAGE);
+    this.name = "ManagedCredentialHomeRejectedError";
+  }
+}
+
 function rejectCredentialHome(): never {
-  throw new Error(REJECTED_CREDENTIAL_HOME_MESSAGE);
+  throw new ManagedCredentialHomeRejectedError();
 }
 
 /** True when `segment` is exactly one path component: not empty, not `.` or `..`, and free of a path separator. */
