@@ -37,7 +37,6 @@ export function acpxBootstrapBlockedError(
 export function acpxSidecarErrorCode(error: Error): string {
   const pending: Error[] = [error];
   const observed = new Set<Error>();
-  let admissionStageCode: string | null = null;
   while (pending.length > 0 && observed.size < 16) {
     const current = pending.shift()!;
     if (observed.has(current)) continue;
@@ -46,9 +45,6 @@ export function acpxSidecarErrorCode(error: Error): string {
     if (code !== null) return code;
 
     const details = current as Error & Record<string, unknown>;
-    admissionStageCode ??= acpxAdmissionStageCode(
-      details.paperclipAcpxAdmissionStage,
-    );
     if (current instanceof AggregateError) {
       for (const nested of current.errors) {
         if (nested instanceof Error) pending.push(nested);
@@ -56,14 +52,7 @@ export function acpxSidecarErrorCode(error: Error): string {
     }
     if (details.cause instanceof Error) pending.push(details.cause);
   }
-  return admissionStageCode ?? "acpx_sidecar_command_failed";
-}
-
-function acpxAdmissionStageCode(value: unknown): string | null {
-  if (typeof value !== "string" || !ACPX_ADMISSION_STAGES.has(value)) {
-    return null;
-  }
-  return `PAPERCLIP_ACPX_ADMISSION_${value.toUpperCase()}`;
+  return "acpx_sidecar_command_failed";
 }
 
 function directAcpxSidecarErrorCode(error: Error): string | null {
@@ -172,18 +161,6 @@ const GENERIC_ACPX_OUTPUT_CODES = new Set([
   "USAGE",
 ]);
 
-const ACPX_ADMISSION_STAGES = new Set([
-  "recovery_binding",
-  "installation",
-  "sandbox",
-  "credential",
-  "provider_lifetime",
-  "command",
-  "tool_bridge",
-  "runtime",
-  "verification",
-]);
-
 const STABLE_ACPX_SIDECAR_CODES = new Set([
   "ACP_MODEL_UNSUPPORTED",
   "ACP_SESSION_INIT_FAILED",
@@ -223,14 +200,5 @@ const STABLE_ACPX_SIDECAR_CODES = new Set([
   "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_TIMEOUT",
   "DIAGNOSTIC_ACPX_GUARDIAN_START_FAILED",
   "DIAGNOSTIC_ACPX_PROVIDER_EXIT_PROOF_MISSING",
-  "PAPERCLIP_ACPX_ADMISSION_RECOVERY_BINDING",
-  "PAPERCLIP_ACPX_ADMISSION_INSTALLATION",
-  "PAPERCLIP_ACPX_ADMISSION_SANDBOX",
-  "PAPERCLIP_ACPX_ADMISSION_CREDENTIAL",
-  "PAPERCLIP_ACPX_ADMISSION_PROVIDER_LIFETIME",
-  "PAPERCLIP_ACPX_ADMISSION_COMMAND",
-  "PAPERCLIP_ACPX_ADMISSION_TOOL_BRIDGE",
-  "PAPERCLIP_ACPX_ADMISSION_RUNTIME",
-  "PAPERCLIP_ACPX_ADMISSION_VERIFICATION",
   ...GENERIC_ACPX_OUTPUT_CODES,
 ]);
