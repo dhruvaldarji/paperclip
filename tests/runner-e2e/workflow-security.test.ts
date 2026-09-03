@@ -185,13 +185,13 @@ describe("public repository paid workflow security", () => {
     expect(buildJob).toContain("runner-e2e-build-bundle.tar.gz.sha256");
     expect(buildJob).toContain("runner-e2e-provider-pack.tar.gz.sha256");
     expect(buildJob).toContain(
-      'build_artifact_name: ${{ steps.build_artifact_name.outputs.name }}',
+      "build_artifact_name: ${{ steps.build_artifact_name.outputs.name }}",
     );
     expect(buildJob).toContain(
       "needs.build_runner_artifacts.outputs.build_artifact_name",
     );
     expect(buildJob).toContain(
-      'provider_pack_artifact_name: ${{ steps.provider_pack_artifact_name.outputs.name }}',
+      "provider_pack_artifact_name: ${{ steps.provider_pack_artifact_name.outputs.name }}",
     );
     expect(workflow).toContain("needs_runner_typescript=");
     expect(workflow).toContain("needs_native_binaries=");

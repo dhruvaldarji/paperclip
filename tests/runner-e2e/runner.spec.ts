@@ -1543,12 +1543,11 @@ for (const execution of executions) {
               );
               continue;
             }
-            const acceptedPlanResetFailures =
-              acceptedPlanSessionResetFailures(
-                "acpx",
-                previousSessionId,
-                current,
-              );
+            const acceptedPlanResetFailures = acceptedPlanSessionResetFailures(
+              "acpx",
+              previousSessionId,
+              current,
+            );
             if (acceptedPlanResetFailures) {
               invariantFailures.push(...acceptedPlanResetFailures);
               continue;

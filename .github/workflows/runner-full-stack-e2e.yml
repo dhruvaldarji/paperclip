@@ -519,7 +519,14 @@ jobs:
 
   test:
     name: ${{ matrix.executionId }}
-    needs: [authorize, catalog, daytona_image, build_runner_artifacts, build_remote_provider_pack]
+    needs:
+      [
+        authorize,
+        catalog,
+        daytona_image,
+        build_runner_artifacts,
+        build_remote_provider_pack,
+      ]
     # The authorize job selects only one of two literal, reviewed runner labels;
     # no dispatch input or repository variable can inject an arbitrary label.
     runs-on: ${{ needs.authorize.outputs.test_runner }}
