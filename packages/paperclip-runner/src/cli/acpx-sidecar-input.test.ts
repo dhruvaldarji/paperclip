@@ -130,6 +130,14 @@ describe("ACPX sidecar input sequencing", () => {
       code: "ACP_MODEL_UNSUPPORTED",
       detailCode: "AGENT_STARTUP_FAILED",
     });
+    const nestedHandshake = new AggregateError(
+      [
+        Object.assign(new Error("admission deadline"), {
+          name: "AcpxSessionHandshakeTimeoutError",
+        }),
+      ],
+      "runtime initialization cleanup failed",
+    );
 
     expect(acpxSidecarErrorCode(missingModule)).toBe(
       "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
@@ -141,5 +149,8 @@ describe("ACPX sidecar input sequencing", () => {
       "violet-circuit-4821",
     );
     expect(acpxSidecarErrorCode(model)).toBe("ACP_MODEL_UNSUPPORTED");
+    expect(acpxSidecarErrorCode(nestedHandshake)).toBe(
+      "ACPX_SESSION_HANDSHAKE_TIMEOUT",
+    );
   });
 });

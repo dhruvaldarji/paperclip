@@ -50,7 +50,10 @@ export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
 // only after the exact attempt reaches a terminal outcome.
 const activeRuntimeCleanupOwners = new Set<Promise<unknown>>();
 const activeCodexRuntimeCleanupOwners = new Set<Promise<unknown>>();
-const SESSION_HANDSHAKE_TIMEOUT_MS = 8_000;
+// Provider initialization may include a cold native app-server start on a
+// minimally provisioned runner. Keep admission finite while allowing the
+// qualified runtime enough time to complete that local handshake.
+const SESSION_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 class AcpxRuntimeCloseTimeoutError extends Error {
   constructor() {
@@ -67,6 +70,8 @@ class AcpxRuntimeCloseFinalTimeoutError extends Error {
 }
 
 class AcpxSessionHandshakeTimeoutError extends Error {
+  readonly code = "ACPX_SESSION_HANDSHAKE_TIMEOUT";
+
   constructor() {
     super("ACPX session handshake exceeded its admission deadline");
     this.name = "AcpxSessionHandshakeTimeoutError";
@@ -828,7 +833,7 @@ function runtimePort(
     }
     if (
       lateReconciliationAttempts >=
-        MAX_LATE_RUNTIME_CLEANUP_RECONCILIATION_ATTEMPTS
+      MAX_LATE_RUNTIME_CLEANUP_RECONCILIATION_ATTEMPTS
     ) {
       return;
     }
@@ -1127,9 +1132,7 @@ function delay(timeoutMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, timeoutMs));
 }
 
-type ProviderExitOutcome =
-  | { exited: true }
-  | { exited: false; error: unknown };
+type ProviderExitOutcome = { exited: true } | { exited: false; error: unknown };
 
 class ProviderExitObservation {
   #outcome: ProviderExitOutcome | null = null;

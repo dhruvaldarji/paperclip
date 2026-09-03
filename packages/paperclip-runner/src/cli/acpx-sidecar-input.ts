@@ -35,13 +35,40 @@ export function acpxBootstrapBlockedError(
  * contributes a closed category and is never copied into the code itself.
  */
 export function acpxSidecarErrorCode(error: Error): string {
+  const pending: Error[] = [error];
+  const observed = new Set<Error>();
+  while (pending.length > 0 && observed.size < 16) {
+    const current = pending.shift()!;
+    if (observed.has(current)) continue;
+    observed.add(current);
+    const code = directAcpxSidecarErrorCode(current);
+    if (code !== null) return code;
+
+    const details = current as Error & Record<string, unknown>;
+    if (current instanceof AggregateError) {
+      for (const nested of current.errors) {
+        if (nested instanceof Error) pending.push(nested);
+      }
+    }
+    if (details.cause instanceof Error) pending.push(details.cause);
+  }
+  return "acpx_sidecar_command_failed";
+}
+
+function directAcpxSidecarErrorCode(error: Error): string | null {
   const details = error as Error & Record<string, unknown>;
   const code =
     typeof details.code === "string"
       ? details.code
       : typeof details.detailCode === "string"
         ? details.detailCode
-        : "acpx_sidecar_command_failed";
+        : null;
+  if (code === null) {
+    return error.name === "AcpxSessionHandshakeTimeoutError" ||
+      error.message === "ACPX session handshake exceeded its admission deadline"
+      ? "ACPX_SESSION_HANDSHAKE_TIMEOUT"
+      : null;
+  }
   if (code !== "AGENT_STARTUP_FAILED") return code;
 
   const stderr =
