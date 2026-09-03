@@ -93,7 +93,7 @@ describe("Codex ACPX runtime adapter", () => {
       OPENAI_API_KEY: "credential-secret",
     });
     expect(runtimeOptions?.spawnCwd).toBe("/workspace");
-    expect(runtimeOptions?.elicitationModes).toEqual([]);
+    expect(runtimeOptions?.elicitationModes).toEqual(["form"]);
     expect(await port.identity()).toEqual({
       acpxRecordId: "record-1",
       backendSessionId: "backend-1",
