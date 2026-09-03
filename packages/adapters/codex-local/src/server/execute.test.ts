@@ -105,6 +105,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
   const cleanupDirs: string[] = [];
   let savedCodexHomeEnv: string | undefined;
   let savedPaperclipHomeEnv: string | undefined;
+  let savedPaperclipInstanceIdEnv: string | undefined;
 
   afterEach(async () => {
     vi.clearAllMocks();
@@ -117,6 +118,11 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       delete process.env.PAPERCLIP_HOME;
     } else {
       process.env.PAPERCLIP_HOME = savedPaperclipHomeEnv;
+    }
+    if (savedPaperclipInstanceIdEnv === undefined) {
+      delete process.env.PAPERCLIP_INSTANCE_ID;
+    } else {
+      process.env.PAPERCLIP_INSTANCE_ID = savedPaperclipInstanceIdEnv;
     }
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
@@ -149,11 +155,15 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
     // The copy-back guard requires its target to sit under the Paperclip-
-    // managed company tree (`<PAPERCLIP_HOME>/instances/default/companies/<id>`),
+    // managed company tree (`<PAPERCLIP_HOME>/instances/<instanceId>/companies/<id>`),
     // so this points PAPERCLIP_HOME at a tmp dir and places the shared host home
     // — what `resolveSharedCodexHomeDir` returns via process.env.CODEX_HOME, and
     // the copy-back target — inside that company's managed tree. The round-trip
-    // never touches the real host credential.
+    // never touches the real host credential. `PAPERCLIP_INSTANCE_ID` is pinned
+    // to the literal "default" segment used below: the guard reads that env var
+    // and falls back to "default" only when it is UNSET, so a suite runner that
+    // sets it ambiently (for its own test isolation) would otherwise point the
+    // guard's boundary at an instance directory this test never creates.
     const paperclipHome = path.join(rootDir, "paperclip-home");
     const companyDir = path.join(paperclipHome, "instances", "default", "companies", COPYBACK_COMPANY_ID);
     const sharedHostHome = path.join(companyDir, "codex-home");
@@ -166,6 +176,8 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     process.env.CODEX_HOME = sharedHostHome;
     savedPaperclipHomeEnv = process.env.PAPERCLIP_HOME;
     process.env.PAPERCLIP_HOME = paperclipHome;
+    savedPaperclipInstanceIdEnv = process.env.PAPERCLIP_INSTANCE_ID;
+    process.env.PAPERCLIP_INSTANCE_ID = "default";
     sandboxAuthFixture.bytes = Buffer.from(input.sandboxAuth, "utf8");
 
     const logs: string[] = [];
