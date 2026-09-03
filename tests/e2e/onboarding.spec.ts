@@ -29,6 +29,26 @@ test.describe("Onboarding wizard", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (err) => pageErrors.push(err.message));
 
+    // `--data-dir` starts a new server, not a new browser profile. Keep a
+    // resumable draft here so this ordinary browser condition is covered when
+    // the company-list invalidation runs after the create request.
+    await page.addInitScript(() => {
+      localStorage.setItem("paperclip-onboarding-state", JSON.stringify({
+        step: 1,
+        companyName: "",
+        createdCompanyId: null,
+      }));
+    });
+    let delayCompanyListRefetch = false;
+    await page.route("**/api/companies", async (route) => {
+      if (delayCompanyListRefetch && route.request().method() === "GET") {
+        // Keep the invalidation observable: a background fetch must not reset
+        // the in-progress wizard.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      await route.continue();
+    });
+
     // New-NUX surfaces are flag-gated default-OFF (PAP-136/137/138): turn the
     // experimental flag on for this throwaway instance before driving them.
     const flagRes = await page.request.patch("/api/instance/settings/experimental", {
@@ -56,6 +76,7 @@ test.describe("Onboarding wizard", () => {
       page.getByRole("heading", { name: "What is the name of your organization?" }),
     ).toBeVisible({ timeout: 15_000 });
     await page.getByPlaceholder("e.g. Northwind Labs").fill(COMPANY_NAME);
+    delayCompanyListRefetch = true;
     await page.getByRole("button", { name: /^Continue/ }).click();
 
     // Step 1's "Next" now creates the company and goes straight to the agent.
