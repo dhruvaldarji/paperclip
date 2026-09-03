@@ -8,7 +8,6 @@ import { RunnerApi } from "./api.js";
 import { FixtureRegistry } from "./fixture-registry.js";
 import { classifyFailure, shouldRetryFailure } from "./failure-classifier.js";
 import {
-  acceptedPlanSessionResetFailures,
   assertIsolatedServerEnvironment,
   buildPaperclipServerEnvironment,
   resolvePaperclipRunnerBinaryForHarness,
@@ -28,6 +27,7 @@ import {
 } from "./redaction.js";
 import { parseDarwinSharedMemory } from "./shared-memory.js";
 import {
+  acceptedPlanSessionResetFailures,
   isControlPlaneGovernedResponseWait,
   isNonExecutingReviewFenceRun,
   numberedPlanStepCount,
