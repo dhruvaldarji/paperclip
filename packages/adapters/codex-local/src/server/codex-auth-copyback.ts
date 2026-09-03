@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -72,6 +72,43 @@ export interface CopyBackCodexAuthInput {
 }
 
 /**
+ * Thrown only when the pinned host directory's identity (its device and
+ * inode) no longer matches a fresh, no-follow read of the same path taken
+ * immediately before a write. This means something removed and recreated
+ * the directory since it was pinned — a directory-replacement race, not a
+ * benign "target is outside the managed tree" outcome. A caller must not
+ * catch this as benign; it must stay fail-loud like every other unexpected
+ * write error.
+ */
+export class CopyBackDirectoryReplacedError extends Error {
+  constructor() {
+    super(
+      "Codex auth copy-back: the host directory changed identity between the last check and the write.",
+    );
+    this.name = "CopyBackDirectoryReplacedError";
+  }
+}
+
+/**
+ * Compares the pinned directory descriptor's identity to a fresh, no-follow
+ * read of the plain directory path. A Linux write addresses the pinned
+ * descriptor itself (through its `/proc/self/fd` alias), so a later swap of
+ * the plain path text cannot redirect it; a non-Linux write still addresses
+ * that plain path text directly, so it needs this last check. A directory
+ * removed and recreated under the same name carries a new device/inode pair
+ * even though it is a plain directory, not a symbolic link — a check for
+ * "not a symbolic link" alone cannot see that swap, so this call compares
+ * identity instead. Call this immediately before each write that follows,
+ * with no other `await` in between.
+ */
+async function assertPinnedDirectoryStillLive(pinnedDir: FileHandle, plainDirPath: string): Promise<void> {
+  const [pinnedStat, liveStat] = await Promise.all([pinnedDir.stat(), lstat(plainDirPath)]);
+  if (pinnedStat.dev !== liveStat.dev || pinnedStat.ino !== liveStat.ino) {
+    throw new CopyBackDirectoryReplacedError();
+  }
+}
+
+/**
  * Guards, locks, and atomically installs a strictly-newer sandbox Codex
  * `auth.json` onto the shared host credential at teardown.
  *
@@ -93,23 +130,29 @@ export interface CopyBackCodexAuthInput {
  *      boundary, so this step is skipped.
  *   3. Inside the lock, re-verify a THIRD time against the real path
  *      `withDirectoryMergeLock` itself just resolved (`fs.realpath` on
- *      `hostDir`, taken at lock-acquisition time). On Linux, immediately
- *      after — with no further `await` in between — open that real
- *      directory with `O_DIRECTORY | O_NOFOLLOW` and pin it behind the
- *      returned file descriptor. This single open call is itself a fourth,
- *      atomic re-check: it fails outright instead of opening a symbolic
- *      link, so a swap in the gap the third check cannot see (between that
- *      check returning and this open running) is still caught. Every write
- *      below then resolves through this descriptor's `/proc/self/fd/<fd>`
- *      alias, never through the plain directory path string again, so a
- *      LATER swap of that string cannot redirect a write the way it could
- *      when a write only ever re-used a path already re-walked from the
- *      root. `/proc` does not exist on a non-Linux platform, so there the
- *      writes below instead address the plain `hostDir` text the three
- *      checks above already re-verified — the strongest containment the
- *      standard library supports without a Linux-only descriptor pin, and
- *      the same approach this function used before the descriptor pin was
- *      added.
+ *      `hostDir`, taken at lock-acquisition time). Immediately after — with
+ *      no further `await` in between — open that real directory with
+ *      `O_DIRECTORY | O_NOFOLLOW` and pin it behind the returned file
+ *      descriptor, on every platform. This single open call is itself a
+ *      fourth, atomic re-check: it fails outright instead of opening a
+ *      symbolic link, so a swap in the gap the third check cannot see
+ *      (between that check returning and this open running) is still
+ *      caught. On Linux, every write below then resolves through this
+ *      descriptor's `/proc/self/fd/<fd>` alias, never through the plain
+ *      directory path string again, so a LATER swap of that string cannot
+ *      redirect a write the way it could when a write only ever re-used a
+ *      path already re-walked from the root. `/proc` does not exist on a
+ *      non-Linux platform, so there the writes below instead address the
+ *      plain `hostDir` text — but immediately before each of those writes,
+ *      with no other `await` in between, the pinned descriptor's identity
+ *      (device and inode) is compared against a fresh, no-follow read of
+ *      that same plain text. A directory removed and recreated under the
+ *      same name is still caught this way even though it is a plain
+ *      directory, not a symbolic link, and so cannot be caught by a
+ *      symbolic-link-only check. Node.js exposes no `openat` or `renameat`,
+ *      so this identity check — immediately before the write it guards —
+ *      is the strongest containment the standard library supports without
+ *      a Linux-only descriptor pin.
  *   4. Stage the bytes to a `0600` temp file inside the pinned directory
  *      (same filesystem as the host target, which doubles as the predicate
  *      `source`). The open uses `O_EXCL` so it fails instead of following or
@@ -210,37 +253,36 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         }
       }
 
-      // On Linux, pin `canonicalHostDir` behind a file descriptor,
-      // immediately, with no further `await` before it is used.
-      // `O_DIRECTORY | O_NOFOLLOW` makes this open call a fourth, atomic
-      // re-check: it fails with `ELOOP` or `ENOTDIR` instead of opening a
-      // symbolic link or a non-directory, so a swap that lands in the gap
-      // the check above cannot see is still caught here. Every write below
-      // then resolves through this descriptor's `/proc/self/fd/<fd>` alias,
-      // not the plain `canonicalHostDir` text used until now, so a swap of
-      // that text AFTER this point can no longer redirect a write. `/proc`
-      // does not exist on a non-Linux platform, so there `writeDirPath`
-      // below stays the plain, already-re-verified `canonicalHostDir` text —
-      // this function's original approach, before the Linux-only descriptor
-      // pin was added.
-      let pinnedDir: FileHandle | undefined;
-      let writeDirPath = canonicalHostDir;
-      if (process.platform === "linux") {
-        try {
-          pinnedDir = await open(
-            canonicalHostDir,
-            fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-          );
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException | null)?.code;
-          if (code !== "ELOOP" && code !== "ENOTDIR") {
-            throw error;
-          }
-          await log(skippedOutsideTreeLog);
-          return "kept-host";
+      // Pin `canonicalHostDir` behind a file descriptor on every platform,
+      // immediately, with no further `await` before it is used. `O_DIRECTORY
+      // | O_NOFOLLOW` makes this open call a fourth, atomic re-check: it
+      // fails with `ELOOP` or `ENOTDIR` instead of opening a symbolic link or
+      // a non-directory, so a swap that lands in the gap the check above
+      // cannot see is still caught here.
+      let pinnedDir: FileHandle;
+      try {
+        pinnedDir = await open(
+          canonicalHostDir,
+          fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code !== "ELOOP" && code !== "ENOTDIR") {
+          throw error;
         }
-        writeDirPath = `/proc/self/fd/${pinnedDir.fd}`;
+        await log(skippedOutsideTreeLog);
+        return "kept-host";
       }
+      // On Linux, every write below resolves through this descriptor's
+      // `/proc/self/fd/<fd>` alias, not the plain `canonicalHostDir` text
+      // used until now, so a swap of that text AFTER this point can no
+      // longer redirect a write. `/proc` does not exist on a non-Linux
+      // platform, so there `writeDirPath` stays the plain `canonicalHostDir`
+      // text, and each write below calls {@link assertPinnedDirectoryStillLive}
+      // immediately beforehand to re-verify that text still names the
+      // SAME directory `pinnedDir` was opened against.
+      const writeDirPath =
+        process.platform === "linux" ? `/proc/self/fd/${pinnedDir.fd}` : canonicalHostDir;
 
       try {
         const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
@@ -256,6 +298,15 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         const stagedTempPath = path.join(canonicalHostDir, tempFileName);
         const writeStagedTempPath = path.join(writeDirPath, tempFileName);
         const writeHostAuthPath = path.join(writeDirPath, hostAuthFileName);
+
+        // A non-Linux write addresses `canonicalHostDir` by plain text, not
+        // through `pinnedDir` itself, so re-verify the text still names the
+        // directory `pinnedDir` was opened against, immediately before the
+        // first write that uses it. Linux writes through `pinnedDir`'s own
+        // `/proc/self/fd` alias, so this check is unnecessary there.
+        if (process.platform !== "linux") {
+          await assertPinnedDirectoryStillLive(pinnedDir, canonicalHostDir);
+        }
 
         // `O_CREAT | O_EXCL` creates the temp private and fails instead of
         // following or overwriting an existing entry; `O_NOFOLLOW` additionally
@@ -280,6 +331,13 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
             errorLabel: "codex auth copy-back",
           });
           if (decision === USE_SOURCE_EXIT) {
+            // The decision predicate above awaited a separate child process —
+            // real time enough for a non-Linux directory swap the earlier
+            // check could not see. Re-verify immediately before this write,
+            // the same way as before the create above.
+            if (process.platform !== "linux") {
+              await assertPinnedDirectoryStillLive(pinnedDir, canonicalHostDir);
+            }
             // Atomic same-directory swap through `writeDirPath`; rename
             // preserves the temp's 0600 mode.
             await rename(writeStagedTempPath, writeHostAuthPath);

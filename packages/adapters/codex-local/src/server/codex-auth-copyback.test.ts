@@ -12,12 +12,24 @@ import {
 import { resolveSharedCodexHomeDir } from "./codex-home.js";
 
 // One-shot hook run from inside the mocked `open` below, right before the
-// real `open` call it wraps. A test arms this to swap a directory for a
-// symbolic link at the exact instant the copy-back's own next `open` call
-// runs — the narrowest point a directory-swap race could land. `null` by
-// default, so every other test in this file runs against the real `open`
-// unchanged.
-let onFirstOpenCall: (() => Promise<void>) | null = null;
+// real `open` call it wraps. It receives the exact arguments the copy-back
+// passed to `open`, so a test can act only once a specific call (for example
+// the one that creates the staging temp file) is about to run, and re-arm
+// itself for a later call otherwise. A test arms this to swap a directory
+// for a symbolic link, or replace it outright, at the exact instant the
+// copy-back's own next `open` call runs — the narrowest point a directory
+// race could land. `null` by default, so every other test in this file runs
+// against the real `open` unchanged.
+let onFirstOpenCall: ((args: unknown[]) => Promise<void>) | null = null;
+
+// One-shot hook run right AFTER a real `open` call resolves (as opposed to
+// `onFirstOpenCall`, which runs right before). A test uses this to land a
+// directory swap the instant after the copy-back pins the directory
+// descriptor — the earliest point a swap could still be caught by a later
+// identity re-check, since the swap must follow the pin to be a genuine
+// "already pinned, now replaced" race rather than a swap the pin's own
+// `O_NOFOLLOW` open would already refuse.
+let onAfterOpenCall: ((args: unknown[]) => Promise<void>) | null = null;
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -27,9 +39,38 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (onFirstOpenCall) {
         const hook = onFirstOpenCall;
         onFirstOpenCall = null;
+        await hook(args);
+      }
+      const handle = await actual.open(...args);
+      if (onAfterOpenCall) {
+        const hook = onAfterOpenCall;
+        onAfterOpenCall = null;
+        await hook(args);
+      }
+      return handle;
+    },
+  };
+});
+
+// One-shot hook run right after the real merge-decision predicate resolves.
+// The predicate runs in a separate `node` child process, so it is real
+// elapsed time a mocked `open`/`rename` hook cannot reach. A test uses this
+// to land a directory swap between the decision and the rename that follows
+// it.
+let onAfterDecideCodexAuthMerge: (() => Promise<void>) | null = null;
+
+vi.mock("./codex-auth-merge-decision.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./codex-auth-merge-decision.js")>();
+  return {
+    ...actual,
+    decideCodexAuthMerge: async (...args: Parameters<typeof actual.decideCodexAuthMerge>) => {
+      const result = await actual.decideCodexAuthMerge(...args);
+      if (onAfterDecideCodexAuthMerge) {
+        const hook = onAfterDecideCodexAuthMerge;
+        onAfterDecideCodexAuthMerge = null;
         await hook();
       }
-      return actual.open(...args);
+      return result;
     },
   };
 });
@@ -934,5 +975,120 @@ describe("copyBackCodexAuth on a non-Linux host", () => {
     expect(logs).toEqual([
       "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
     ]);
+  });
+});
+
+// A symbolic-link check alone cannot see a directory that a local attacker
+// removed and recreated as a fresh, PLAIN directory under the same name — the
+// replacement is still a real directory, not a link. On Linux, every write
+// addresses the directory descriptor pinned before this replacement could
+// land, so the replacement never redirects a write; on a non-Linux platform
+// the write still addresses the directory by its plain path text, so this
+// suite proves the copy-back re-checks the pinned descriptor's identity
+// (device and inode) immediately before that write and rejects instead of
+// installing into the replacement.
+describe("copyBackCodexAuth directory-replacement race protection on a non-Linux host", () => {
+  const cleanupDirs: string[] = [];
+  const originalPlatform = process.platform;
+
+  afterEach(async () => {
+    onFirstOpenCall = null;
+    onAfterOpenCall = null;
+    onAfterDecideCodexAuthMerge = null;
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const NEWER = "2026-07-09T02:00:00Z";
+  const OLDER = "2026-07-09T01:00:00Z";
+
+  it("rejects the write instead of installing into a directory removed and recreated right after the descriptor was pinned", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-replace-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    // A decoy planted in the REPLACEMENT directory: if the copy-back wrote
+    // through the plain path text without re-checking identity, this decoy
+    // would end up overwritten by the sandbox credential instead of the
+    // write being rejected. Fires right after the copy-back's directory-pin
+    // `open` call resolves — the earliest point a genuine "already pinned,
+    // now replaced" race can land.
+    const decoyAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "decoy-after-swap" });
+    onAfterOpenCall = async () => {
+      await rm(hostDir, { recursive: true, force: true });
+      await mkdir(hostDir, { recursive: true });
+      await writeFile(path.join(hostDir, "auth.json"), decoyAuth, { mode: 0o600 });
+    };
+
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/changed identity/);
+
+    // The replacement directory's own decoy is untouched — the copy-back
+    // never wrote through the replaced directory.
+    expect(await readFile(path.join(hostDir, "auth.json"), "utf8")).toBe(decoyAuth);
+    expect(await readdir(hostDir)).toEqual(["auth.json"]);
+  });
+
+  it("rejects the write when the replacement lands between the merge decision and the rename", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-replace-late-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    // The merge-decision predicate runs as a separate `node` child process —
+    // real elapsed time the create-time re-check cannot reach. Fires right
+    // after that predicate resolves with "use source" for the strictly-newer
+    // same-identity sandbox credential below, and replaces the directory
+    // with a fresh, plain one under the same name before the rename runs.
+    onAfterDecideCodexAuthMerge = async () => {
+      await rm(hostDir, { recursive: true, force: true });
+      await mkdir(hostDir, { recursive: true });
+    };
+
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/changed identity/);
+
+    // The replacement directory is empty — the rename never landed there.
+    expect(await readdir(hostDir)).toEqual([]);
   });
 });
