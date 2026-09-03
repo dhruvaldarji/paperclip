@@ -70,6 +70,8 @@ function directAcpxSidecarErrorCode(error: Error): string | null {
       ? detailCode
       : (outputCode ?? detailCode);
   if (code === null) {
+    const guardianDiagnostic = diagnosticGuardianErrorCode(error.message);
+    if (guardianDiagnostic !== null) return guardianDiagnostic;
     return error.name === "AcpxSessionHandshakeTimeoutError" ||
       error.message === "ACPX session handshake exceeded its admission deadline"
       ? "ACPX_SESSION_HANDSHAKE_TIMEOUT"
@@ -110,6 +112,36 @@ function directAcpxSidecarErrorCode(error: Error): string | null {
     return "AGENT_STARTUP_FAILED.EXIT_NONZERO";
   }
   return "AGENT_STARTUP_FAILED.OTHER";
+}
+
+function diagnosticGuardianErrorCode(message: string): string | null {
+  if (message === "ACPX provider lifetime guardian ownership timed out") {
+    return "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_TIMEOUT";
+  }
+  if (
+    message ===
+    "ACPX provider lifetime guardian exited before ownership transfer"
+  ) {
+    return "DIAGNOSTIC_ACPX_GUARDIAN_EXITED_BEFORE_OWNERSHIP";
+  }
+  if (message === "ACPX provider lifetime guardian failed to start") {
+    return "DIAGNOSTIC_ACPX_GUARDIAN_START_FAILED";
+  }
+  if (
+    message === "ACPX provider lifetime guardian omitted its ownership pipe"
+  ) {
+    return "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_PIPE_MISSING";
+  }
+  if (message === "Managed Codex credential ownership was lost") {
+    return "DIAGNOSTIC_ACPX_CREDENTIAL_OWNERSHIP_LOST";
+  }
+  if (message === "Managed Codex credential lifetime owner is invalid") {
+    return "DIAGNOSTIC_ACPX_CREDENTIAL_OWNER_INVALID";
+  }
+  if (message === "ACPX provider exit proof is unavailable") {
+    return "DIAGNOSTIC_ACPX_PROVIDER_EXIT_PROOF_MISSING";
+  }
+  return null;
 }
 
 const GENERIC_ACPX_OUTPUT_CODES = new Set([
@@ -153,5 +185,12 @@ const STABLE_ACPX_SIDECAR_CODES = new Set([
   "ACPX_SESSION_ENSURE_TYPE_ERROR",
   "ACPX_SESSION_HANDSHAKE_TIMEOUT",
   "ACPX_SIDECAR_STATUS_READ_TIMEOUT",
+  "DIAGNOSTIC_ACPX_CREDENTIAL_OWNER_INVALID",
+  "DIAGNOSTIC_ACPX_CREDENTIAL_OWNERSHIP_LOST",
+  "DIAGNOSTIC_ACPX_GUARDIAN_EXITED_BEFORE_OWNERSHIP",
+  "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_PIPE_MISSING",
+  "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_TIMEOUT",
+  "DIAGNOSTIC_ACPX_GUARDIAN_START_FAILED",
+  "DIAGNOSTIC_ACPX_PROVIDER_EXIT_PROOF_MISSING",
   ...GENERIC_ACPX_OUTPUT_CODES,
 ]);
