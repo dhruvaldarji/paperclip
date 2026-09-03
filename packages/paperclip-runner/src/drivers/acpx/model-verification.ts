@@ -22,7 +22,10 @@ export async function requireVerifiedAcpxModel(
   profile: QualifiedAcpxProfile,
 ): Promise<AcpxModelStatus> {
   if (!control.getStatus) {
-    throw new Error("ACPX agent cannot verify its effective model");
+    throw acpxModelVerificationError(
+      "ACPX_MODEL_STATUS_UNAVAILABLE",
+      "ACPX agent cannot verify its effective model",
+    );
   }
   const requestedModel = profile.qualificationModel;
   let status = await control.getStatus();
@@ -31,7 +34,8 @@ export async function requireVerifiedAcpxModel(
     status.models?.currentModelId !== requestedModel;
   if (mustSelectCanonical) {
     if (!control.setModel) {
-      throw new Error(
+      throw acpxModelVerificationError(
+        "ACPX_MODEL_SELECTION_UNAVAILABLE",
         "ACPX agent cannot verify its canonical model through ACP config options",
       );
     }
@@ -39,11 +43,16 @@ export async function requireVerifiedAcpxModel(
     status = await control.getStatus();
   }
   if (status.models?.currentModelId !== profile.reportedModelId) {
-    throw new Error(
+    throw acpxModelVerificationError(
+      "ACPX_EFFECTIVE_MODEL_MISMATCH",
       `ACPX effective model mismatch: requested ${requestedModel}, expected ACP selector ${profile.reportedModelId}, received ${status.models?.currentModelId ?? "unverified"}`,
     );
   }
   return normalizeQualifiedModelStatus(status, profile);
+}
+
+function acpxModelVerificationError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
 }
 
 function normalizeQualifiedModelStatus(
