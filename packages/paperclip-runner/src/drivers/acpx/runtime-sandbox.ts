@@ -117,6 +117,14 @@ const ACPX_SANDBOX_ROOT_GATE_RETRY_DELAY_MS = 15;
 // Infix for the private path stale-gate recovery renames a gate to while it
 // checks the gate's identity. See `breakStaleAcpxRuntimeSandboxRootGate`.
 const ACPX_SANDBOX_ROOT_GATE_REAP_INFIX = ".reap-";
+// A holder writes its pid and token right after it creates the gate file,
+// with no other I/O step between the two calls. A gate that still carries
+// no readable pid after this much time has passed since its creation did
+// not just lose a short race with its own holder's write: its creator most
+// likely exited before it could write. This grace period must stay well
+// under `ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS`, so a waiting admission
+// gets more than one chance to recover the gate before it gives up.
+const ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS = 1_000;
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -812,9 +820,18 @@ async function acquireAcpxRuntimeSandboxRootGate(
 // Removes a gate file left behind by a holder process that no longer exists,
 // so a hard process crash inside the critical section cannot block every
 // later admission for this root forever. Never removes a gate whose holder
-// is still alive, or one this process cannot prove is dead, and never makes
-// the shared path briefly name nothing — a live holder's gate must stay
-// exclusive at the shared path for as long as that holder keeps it there.
+// is still alive, and never makes the shared path briefly name nothing — a
+// live holder's gate must stay exclusive at the shared path for as long as
+// that holder keeps it there.
+//
+// A gate can also carry no readable pid at all: its holder crashed between
+// creating the gate file and writing its pid and token to it. This call
+// cannot check a dead-or-alive pid it cannot read, so it instead falls back
+// to the gate's own age. A gate with no readable pid, still that way after
+// `ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS` has passed since its creation, did
+// not just lose a short race with its own holder's write: treat it the same
+// as a gate whose holder proved dead. A gate younger than that grace period
+// is left alone, the same as a gate a live holder still owns.
 //
 // A plain read-then-unlink cannot inspect and remove safely: whatever this
 // call reads to confirm identity, a later, separate unlink call still
@@ -857,29 +874,31 @@ async function breakStaleAcpxRuntimeSandboxRootGate(
     throw error;
   }
   try {
-    let holderPid: number;
+    const pinnedEntry = await lstat(capturePath, { bigint: true });
+    let holderPid: number | null;
     try {
       const bytes = await readFile(capturePath);
       const contents = bytes.toString("utf8").trim();
       const parsed = Number.parseInt(contents, 10);
-      if (!Number.isInteger(parsed) || parsed <= 0) {
-        // Empty or malformed: a holder writes its pid and token only after
-        // it has already created the gate file, so a gate this call reads
-        // in that gap looks the same as one that is genuinely malformed.
-        // Neither proves the holder dead, so treat both as still live.
-        return;
-      }
-      holderPid = parsed;
+      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
     } catch {
       // Unreadable: nothing provable to break here.
       return;
     }
-    if (isAcpxSandboxRootGateHolderAlive(holderPid)) {
-      return;
+    if (holderPid !== null) {
+      if (isAcpxSandboxRootGateHolderAlive(holderPid)) {
+        return;
+      }
+    } else {
+      // Empty or malformed: no pid to check. Wait out the grace period
+      // instead, so a holder still writing its pid keeps its gate.
+      const ageMs = Date.now() - Number(pinnedEntry.mtimeMs);
+      if (ageMs < ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS) {
+        return;
+      }
     }
     await dependencies.beforeStaleGateRemoval?.();
 
-    const pinnedEntry = await lstat(capturePath, { bigint: true });
     const sharedEntry = await lstat(gatePath, { bigint: true }).catch(
       (error) => {
         if (errorCode(error) === "ENOENT") return null;

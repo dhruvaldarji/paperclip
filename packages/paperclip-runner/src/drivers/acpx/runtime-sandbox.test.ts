@@ -624,8 +624,10 @@ describe("ACPX runtime sandbox", () => {
       });
 
     await waitForConcurrentClaimHeadStart();
-    // The still-empty gate must not be reaped: its holder has not yet
-    // proven, one way or the other, whether it is alive or dead.
+    // The still-empty gate must not be reaped this soon after its creation:
+    // its holder has not yet proven, one way or the other, whether it is
+    // alive or dead. Recovery only reaps an empty gate once its own
+    // initialization grace period has passed — see the next test.
     expect(waitingSettled).toBe(false);
     await expect(readFile(gatePath, "utf8")).resolves.toBe("");
 
@@ -636,6 +638,47 @@ describe("ACPX runtime sandbox", () => {
     const sandbox = await waiting;
     expect(sandbox.root).toBe(probe.root);
     await waitingProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
+
+  it("recovers a gate whose holder exited before writing its pid and token", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder exited between creating the gate file and writing its pid
+    // and token to it: the gate file exists, but it stays empty forever.
+    await writeFile(gatePath, "", { flag: "wx" });
+
+    vi.resetModules();
+    const waitingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    const waiting = waitingProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await waitForConcurrentClaimHeadStart();
+
+    // Move the clock forward past the gate's initialization grace period,
+    // the same way real elapsed time would move it, without a real
+    // multi-second wait. Recovery reads this gate's age from the file
+    // system's own record of when it was created, so advancing only
+    // `Date.now()` is enough; the gate's real modification time never
+    // changes.
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + 1_500);
+    try {
+      const sandbox = await waiting;
+      expect(sandbox.root).toBe(probe.root);
+      await expect(stat(gatePath)).rejects.toMatchObject({ code: "ENOENT" });
+      await waitingProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("never removes a live gate that replaced the stale gate recovery inspected", async () => {
