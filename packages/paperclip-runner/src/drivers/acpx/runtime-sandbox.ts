@@ -440,6 +440,15 @@ export interface AcpxRuntimeSandboxPrepareDependencies {
    * prove recovery's restore never clobbers that claim.
    */
   afterStaleGateCapture?: () => Promise<void>;
+  /**
+   * Internal test seam. Runs once this admission's own critical section has
+   * ended, immediately before it releases its gate. Lets a test hold a
+   * still-live gate open at the shared path, to prove a concurrent
+   * stale-gate recovery pass can displace it without this admission's own
+   * later release ever touching whatever a fresh claimant has since put in
+   * its place.
+   */
+  beforeGateRelease?: () => Promise<void>;
 }
 
 /** Prepare the private filesystem and environment visible to an ACPX agent. */
@@ -770,6 +779,13 @@ interface AcpxRuntimeSandboxRootGateDependencies {
    * atomic capture and the restore in `removeStaleAcpxRuntimeSandboxRootGate`,
    * exercised only in tests. */
   afterStaleGateCapture?: () => Promise<void>;
+  /** Internal seam that runs once this holder's own critical section has
+   * ended, immediately before it releases its gate. Lets a test hold a
+   * still-live gate open at the shared path, to prove a concurrent stale-gate
+   * recovery pass can displace it without this holder's own later release
+   * ever touching whatever a fresh claimant has since put in its place.
+   * Exercised only in tests. */
+  beforeGateRelease?: () => Promise<void>;
 }
 
 /**
@@ -796,6 +812,7 @@ async function withAcpxRuntimeSandboxRootGate<T>(
       try {
         return await criticalSection();
       } finally {
+        await dependencies.beforeGateRelease?.();
         await releaseAcpxRuntimeSandboxRootGate(gatePath, ownContent);
       }
     }
@@ -874,36 +891,107 @@ async function acquireAcpxRuntimeSandboxRootGate(
   return content;
 }
 
-// Releases this holder's own gate. A plain unlink by pathname is usually
-// enough, but a concurrent stale-gate recovery can have captured this exact
-// gate under a private reap name for inspection (see
-// `breakStaleAcpxRuntimeSandboxRootGate`) just before this call runs,
-// leaving nothing at `gatePath` to unlink even though this holder's
-// critical section has genuinely ended. Left alone, that recovery can then
-// restore what it captured after this holder is already done, resurrecting
-// a gate nobody holds — later admissions would read its still-alive pid and
-// treat it as live indefinitely. When the plain unlink finds nothing, this
-// call instead finds and removes the capture directly, by content rather
-// than by guessing its private name, so a recovery that later tries to
-// restore it finds nothing there. A capture can also already have been
-// restored back to `gatePath` by the time this call notices the first
-// unlink failed, so this call retries the plain unlink once more after
-// clearing any capture, closing the gap in either ordering.
+// Releases this holder's own gate. This must remove only the exact gate
+// instance this holder acquired, never a fresh gate a later claimant has
+// since put at the shared path — so a plain, unconditional `unlink(gatePath)`
+// is never safe here. A concurrent stale-gate recovery pass can displace
+// this holder's own still-live gate before this call runs (see
+// `removeStaleAcpxRuntimeSandboxRootGate`): it captures whatever names the
+// shared path with an atomic `rename`, and when a fresh claimant grabs the
+// now-momentarily-empty shared path before recovery's restore can land,
+// recovery leaves the captured gate stranded under a private name and
+// never touches the shared path again. From this holder's point of view,
+// by the time its own critical section ends, `gatePath` can therefore name
+// three different things: this holder's own gate (the common case, nothing
+// displaced it), nothing at all (recovery captured it and is still
+// deciding what to do), or a different claimant's gate entirely (recovery
+// captured this holder's gate and a fresh claimant has since taken the
+// shared path). An unconditional unlink cannot tell these apart, so it
+// would delete a later claimant's live gate right along with its own,
+// reopening the exact claim-versus-teardown race this gate exists to
+// close.
+//
+// This call instead captures whatever currently names `gatePath` with the
+// same atomic `rename` recovery uses, then only proceeds by content: a
+// match proves it caught its own gate, safe to delete for good; a mismatch
+// means some other claimant's gate was caught by mistake, so this call
+// restores it immediately with `link` — never `rename` — so a third
+// claimant that has since taken the now-momentarily-empty shared path is
+// never clobbered by the restore. Either way, once the shared path is no
+// longer this holder's own concern, this call finishes by searching for its
+// own gate under a stray reap-named capture with
+// `reclaimAcpxRuntimeSandboxRootGateCapture`, since stale-gate recovery may
+// still be holding it there, or may have already restored it back to
+// `gatePath` in between, in which case a second capture attempt finds and
+// removes it directly.
 async function releaseAcpxRuntimeSandboxRootGate(
   gatePath: string,
   ownContent: string,
 ): Promise<void> {
-  const releasedDirectly = await unlink(gatePath)
-    .then(() => true)
-    .catch((error) => {
-      if (errorCode(error) === "ENOENT") return false;
-      throw error;
-    });
-  if (releasedDirectly) return;
+  if (
+    (await captureAndReleaseAcpxRuntimeSandboxRootGate(
+      gatePath,
+      ownContent,
+    )) === "released"
+  ) {
+    return;
+  }
   await reclaimAcpxRuntimeSandboxRootGateCapture(gatePath, ownContent);
-  await unlink(gatePath).catch((error) => {
+  await captureAndReleaseAcpxRuntimeSandboxRootGate(gatePath, ownContent);
+}
+
+type AcpxRuntimeSandboxRootGateCaptureOutcome =
+  | "released"
+  | "absent"
+  | "displaced";
+
+// Atomically captures whatever currently names `gatePath` and, only when its
+// content proves it is this holder's own gate, deletes it for good.
+// Whatever else this call finds at `gatePath` — a different claimant's live
+// gate, or nothing at all — is left exactly as this holder found it: a
+// mismatched capture is put straight back (or, if a fresh claimant has since
+// taken the shared path, left under its own private name for that gate's
+// real owner to find later by content), and a missing gate means there is
+// nothing here for this holder to release directly.
+async function captureAndReleaseAcpxRuntimeSandboxRootGate(
+  gatePath: string,
+  ownContent: string,
+): Promise<AcpxRuntimeSandboxRootGateCaptureOutcome> {
+  const capturePath = `${gatePath}${ACPX_SANDBOX_ROOT_GATE_REAP_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    await rename(gatePath, capturePath);
+  } catch (error) {
+    // Nothing at the shared path to release directly.
+    if (errorCode(error) === "ENOENT") return "absent";
+    throw error;
+  }
+  const contents = await readFile(capturePath, "utf8").catch((error) => {
+    if (errorCode(error) === "ENOENT") return null;
+    throw error;
+  });
+  if (contents === ownContent) {
+    await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+    return "released";
+  }
+  // The rename caught a gate that is not this holder's own: a different
+  // claimant's gate was at the shared path. Put it straight back, unless a
+  // further claimant has since taken the now-momentarily-empty shared path.
+  try {
+    await link(capturePath, gatePath);
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw error;
+    // A further claimant grabbed the shared path first: leave the captured
+    // gate under its own private name rather than clobber that claim. Its
+    // real owner's own release finds it later, by content, the same way
+    // this call looks for its own gate below.
+    return "displaced";
+  }
+  await unlink(capturePath).catch((error) => {
     if (errorCode(error) !== "ENOENT") throw error;
   });
+  return "displaced";
 }
 
 // Finds and removes any reap-named capture of `gatePath` whose content

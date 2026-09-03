@@ -1060,6 +1060,131 @@ describe("ACPX runtime sandbox", () => {
 
     await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
   });
+
+  it("never lets a displaced holder's own release clobber the gate a third claimant put in its place", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    await writeFile(gatePath, String(deadHolder.pid), { flag: "wx" });
+
+    vi.resetModules();
+    const recoveringProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    let resumeDisplacedHolder: () => void = () => {};
+    const displacedHolderPaused = new Promise<void>((settle) => {
+      resumeDisplacedHolder = settle;
+    });
+    let displacedHolderProcess: typeof import("./runtime-sandbox.js") | null =
+      null;
+    let displacedHolderClaim: ReturnType<typeof prepareAcpxRuntimeSandbox> | null =
+      null;
+    const thirdClaimantGateContents = `${process.pid}:third-claimant`;
+
+    // Recovery proves the dead gate stale, then, before it decides whether
+    // the shared path still names that exact dead gate, a real second
+    // admission wins the shared path with its own live gate and holds its
+    // critical section open right up to its own release — the moment a
+    // stale-gate recovery pass can displace a genuinely live holder.
+    const recovered = recoveringProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        beforeStaleGateRemoval: async () => {
+          await unlink(gatePath);
+
+          vi.resetModules();
+          displacedHolderProcess = await import("./runtime-sandbox.js");
+          displacedHolderClaim = displacedHolderProcess.prepareAcpxRuntimeSandbox(
+            { binding: fixture.binding, agent: "codex" },
+            { beforeGateRelease: () => displacedHolderPaused },
+          );
+
+          // Wait until the displaced holder has published its own real gate
+          // and paused just before releasing it, so recovery's capture below
+          // catches a genuinely complete live gate, never an in-progress
+          // write.
+          await waitForAcpxSandboxGateState(async () => {
+            const contents = await readFile(gatePath, "utf8").catch(
+              () => null,
+            );
+            expect(contents).toMatch(/^\d+:[0-9a-f]{32}$/);
+          });
+        },
+        afterStaleGateCapture: async () => {
+          // A third claimant grabs the shared path in the instant recovery's
+          // capture vacates it, before recovery's own restore can land.
+          await writeFile(gatePath, thirdClaimantGateContents, {
+            flag: "wx",
+          });
+        },
+      },
+    );
+
+    // Recovery's restore attempt reaches this state through several real
+    // filesystem calls, so this polls for it rather than assuming a fixed
+    // delay was enough time.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(readFile(gatePath, "utf8")).resolves.toBe(
+        thirdClaimantGateContents,
+      );
+    });
+
+    // The displaced holder's own live gate was not lost: it is stranded
+    // under a private reap name, off the shared path, because recovery's
+    // restore lost the shared path to the third claimant.
+    const strandedBeforeRelease = await waitForAcpxSandboxGateState(
+      async () => {
+        const entries = (await readdir(dirname(gatePath))).filter((entry) =>
+          entry.includes(".reap-"),
+        );
+        expect(entries).toHaveLength(1);
+        return entries;
+      },
+    );
+    const displacedHolderGateContents = await readFile(
+      join(dirname(gatePath), strandedBeforeRelease[0]),
+      "utf8",
+    );
+    expect(displacedHolderGateContents).toMatch(/^\d+:[0-9a-f]{32}$/);
+
+    // Let the displaced holder proceed to release its own gate. Its release
+    // must find its own gate under the stray reap name, not at the shared
+    // path, and must never touch the third claimant's gate now sitting
+    // there — the exact failure this test guards against.
+    resumeDisplacedHolder();
+    const displacedHolderSandbox = await displacedHolderClaim!;
+    expect(displacedHolderSandbox.root).toBe(probe.root);
+
+    await expect(readFile(gatePath, "utf8")).resolves.toBe(
+      thirdClaimantGateContents,
+    );
+    expect(
+      (await readdir(dirname(gatePath))).filter((entry) =>
+        entry.includes(".reap-"),
+      ),
+    ).toHaveLength(0);
+
+    // Free the third claimant's gate, as its own holder would on completing
+    // its claim, so the still-retrying recovery call above can stop
+    // retrying and acquire the now-free gate.
+    await unlink(gatePath);
+
+    const sandbox = await recovered;
+    expect(sandbox.root).toBe(probe.root);
+
+    await displacedHolderProcess!.removeOwnedAcpxRuntimeSandboxRoot(
+      displacedHolderSandbox,
+    );
+    await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
 });
 
 async function sandboxFixture(agent: "pi" | "claude" | "codex") {
