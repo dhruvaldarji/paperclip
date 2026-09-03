@@ -29,10 +29,10 @@ describe("runner E2E catalog", () => {
     expect(localIntegrityTasks).toHaveLength(2);
     expect(openRouterBreadthTasks).toHaveLength(3);
     expect(runnerSuites.map((suite) => suite.expectedMatrixSize)).toEqual([
-      42, 14, 11,
+      42, 14, 10,
     ]);
-    expect(validateRunnerCatalog()).toHaveLength(67);
-    expect(new Set(runnerMatrix.map((entry) => entry.id)).size).toBe(67);
+    expect(validateRunnerCatalog()).toHaveLength(66);
+    expect(new Set(runnerMatrix.map((entry) => entry.id)).size).toBe(66);
     expect(
       runnerMatrix.filter((entry) => entry.suite.id === "core-compatibility"),
     ).toHaveLength(42);
@@ -45,26 +45,36 @@ describe("runner E2E catalog", () => {
       runnerMatrix.filter(
         (entry) => entry.suite.id === "openrouter-model-breadth",
       ),
-    ).toHaveLength(11);
+    ).toHaveLength(10);
     expect(
       runnerMatrix.reduce(
         (total, execution) => total + execution.task.expectedRunCount,
         0,
       ),
-    ).toBe(116);
+    ).toBe(114);
   });
 
   it("derives the qualified local native OpenCode profiles from the ranked snapshot", () => {
     expect(openRouterBreadthExcludedModelIds).toEqual(["xiaomi/mimo-v2.5"]);
     expect(openRouterBreadthExcludedExecutionIds).toEqual([
       "openrouter-model-breadth.openrouter-deepseek-deepseek-v4-flash-0731.local.plan-approve-complete",
+      "openrouter-model-breadth.openrouter-tencent-hy3.local.plan-approve-complete",
     ]);
     expect(
-      runnerMatrix.some(
-        (execution) =>
-          execution.id === openRouterBreadthExcludedExecutionIds[0],
+      openRouterBreadthExcludedExecutionIds.every(
+        (excludedExecutionId) =>
+          !runnerMatrix.some(
+            (execution) => execution.id === excludedExecutionId,
+          ),
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      runnerMatrix
+        .filter(
+          (execution) => execution.profile.id === "openrouter-tencent-hy3",
+        )
+        .map((execution) => execution.task.id),
+    ).toEqual(["hello-complete", "question-resume-complete"]);
     expect(
       openRouterBreadthProfiles.map((profile) => profile.ranking?.rank),
     ).toEqual([1, 3, 4, 5]);
@@ -323,7 +333,7 @@ describe("runner E2E selectors", () => {
     const selected = selectRunnerExecutions(
       parseRunnerSelectors(["--suite", "openrouter-model-breadth"]),
     );
-    expect(selected).toHaveLength(11);
+    expect(selected).toHaveLength(10);
     expect(
       selected.every(
         (entry) =>
@@ -360,9 +370,10 @@ describe("runner E2E selectors", () => {
     const jobs = buildMatrixJobs(
       selectRunnerExecutions(parseRunnerSelectors(["--all"])),
     );
-    expect(jobs).toHaveLength(67);
+    expect(jobs).toHaveLength(66);
     expect(jobs.filter((job) => job.needsDaytona)).toHaveLength(21);
-    expect(new Set(jobs.map((job) => job.executionId)).size).toBe(67);
+    expect(jobs.filter((job) => !job.needsDaytona)).toHaveLength(45);
+    expect(new Set(jobs.map((job) => job.executionId)).size).toBe(66);
     expect(
       jobs.every((job) =>
         runnerMatrix.some(

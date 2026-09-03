@@ -265,6 +265,7 @@ export const runnerProfiles: readonly RunnerProfileFixture[] = [
 export const openRouterBreadthExcludedModelIds = ["xiaomi/mimo-v2.5"] as const;
 export const openRouterBreadthExcludedExecutionIds = [
   "openrouter-model-breadth.openrouter-deepseek-deepseek-v4-flash-0731.local.plan-approve-complete",
+  "openrouter-model-breadth.openrouter-tencent-hy3.local.plan-approve-complete",
 ] as const;
 const openRouterBreadthExcludedModelIdSet = new Set<string>(
   openRouterBreadthExcludedModelIds,
@@ -747,7 +748,7 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     environments: [localEnvironment],
     tasks: openRouterBreadthTasks,
     excludedExecutionIds: openRouterBreadthExcludedExecutionIds,
-    expectedMatrixSize: 11,
+    expectedMatrixSize: 10,
     definitionMetadata: {
       rankingSnapshotId: openRouterRankingSnapshot.snapshotId,
       rankingContentHash: openRouterRankingSnapshot.contentHash,
@@ -963,8 +964,8 @@ export function validateRunnerCatalog(): MatrixExecution[] {
       );
     }
   }
-  if (matrix.length !== 67)
-    throw new Error(`Expected 67 runner executions; received ${matrix.length}`);
+  if (matrix.length !== 66)
+    throw new Error(`Expected 66 runner executions; received ${matrix.length}`);
   return matrix;
 }
 

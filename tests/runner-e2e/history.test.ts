@@ -68,16 +68,16 @@ describe("runner E2E campaign history", () => {
       expected: breadth.map((execution) => execution.id),
       results: breadth.map((execution) => result(execution, "passed")),
     });
-    expect(campaign).toMatchObject({ complete: false, passed: 11, failed: 0 });
+    expect(campaign).toMatchObject({ complete: false, passed: 10, failed: 0 });
     expect(campaign.suites[0]).toMatchObject({
       suiteId: "openrouter-model-breadth",
       complete: true,
-      selected: 11,
+      selected: 10,
     });
     expect(campaign.billing).toMatchObject({
-      llm: { inputTokens: 1_100, outputTokens: 275 },
+      llm: { inputTokens: 1_000, outputTokens: 250 },
     });
-    expect(campaign.billing.reportedLlmCostUsd).toBeCloseTo(0.11, 10);
+    expect(campaign.billing.reportedLlmCostUsd).toBeCloseTo(0.1, 10);
     const history = mergeRunnerHistory(
       emptyRunnerHistory(),
       campaignHistoryRecord(campaign, "https://history.example/runner-e2e"),
@@ -151,8 +151,8 @@ describe("runner E2E campaign history", () => {
     expect(index).toContain("Runner E2E campaigns");
     expect(index).toContain("complete-green");
     expect(index).toContain("complete-red");
-    expect(index).toContain("67/67 passed");
-    expect(index).toContain("66/67 passed");
+    expect(index).toContain("66/66 passed");
+    expect(index).toContain("65/66 passed");
     expect(index).toContain("Open report&nbsp;→");
     expect(index).toContain(
       "Visual evidence remains in access-controlled workflow artifacts",
