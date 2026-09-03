@@ -1048,10 +1048,12 @@ async function persistedRuntimeStatus(
       { code: "ACPX_PERSISTED_SESSION_MISSING" },
     );
   }
+  const persistedAgentSessionId =
+    nonEmptyRuntimeIdentity(record.agentSessionId) ?? record.acpSessionId;
   if (
     record.acpxRecordId !== identity.acpxRecordId ||
     record.acpSessionId !== identity.backendSessionId ||
-    record.agentSessionId !== identity.agentSessionId
+    persistedAgentSessionId !== identity.agentSessionId
   ) {
     throw Object.assign(
       new Error("The persisted ACPX session identity changed after admission"),
@@ -1064,12 +1066,12 @@ async function persistedRuntimeStatus(
     summary: [
       `session=${record.acpxRecordId}`,
       `backendSessionId=${record.acpSessionId}`,
-      `agentSessionId=${record.agentSessionId}`,
+      `agentSessionId=${persistedAgentSessionId}`,
       record.closed === true ? "closed" : "open",
     ].join(" "),
     acpxRecordId: record.acpxRecordId,
     backendSessionId: record.acpSessionId,
-    agentSessionId: record.agentSessionId,
+    agentSessionId: persistedAgentSessionId,
     ...(currentModelId === undefined && !availableModelIds?.length
       ? {}
       : {
@@ -1491,17 +1493,21 @@ function pushUnique(errors: unknown[], error: unknown): void {
 }
 
 function requireIdentity(handle: AcpRuntimeHandle): AcpxRuntimePortIdentity {
-  const identity = {
-    acpxRecordId: handle.acpxRecordId,
-    backendSessionId: handle.backendSessionId,
-    agentSessionId: handle.agentSessionId,
-  };
-  for (const [name, value] of Object.entries(identity)) {
-    if (typeof value !== "string" || value.length === 0) {
-      throw new Error(`ACPX runtime omitted ${name}`);
-    }
+  const acpxRecordId = nonEmptyRuntimeIdentity(handle.acpxRecordId);
+  if (!acpxRecordId) throw new Error("ACPX runtime omitted acpxRecordId");
+  const backendSessionId = nonEmptyRuntimeIdentity(handle.backendSessionId);
+  if (!backendSessionId) {
+    throw new Error("ACPX runtime omitted backendSessionId");
   }
-  return identity as AcpxRuntimePortIdentity;
+  return {
+    acpxRecordId,
+    backendSessionId,
+    // ACPX agents do not all advertise a distinct native thread identity.
+    // In that case the backend ID is the real ACP protocol session, so retain
+    // it explicitly rather than inventing a Paperclip-owned identifier.
+    agentSessionId:
+      nonEmptyRuntimeIdentity(handle.agentSessionId) ?? backendSessionId,
+  };
 }
 
 function definedEnvironment(
