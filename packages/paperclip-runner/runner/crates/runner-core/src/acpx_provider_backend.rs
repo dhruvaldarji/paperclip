@@ -108,7 +108,10 @@ struct AcpxProviderDescriptor {
 }
 
 impl AcpxProviderDescriptor {
-    fn validate(&self, context: &AcpxEventProjectionContext) -> Result<(), DurableRunnerError> {
+    fn validate_session(
+        &self,
+        context: &AcpxEventProjectionContext,
+    ) -> Result<(), DurableRunnerError> {
         let expected = match self.agent.as_str() {
             "claude" => (
                 "claude-sonnet-5",
@@ -156,11 +159,19 @@ impl AcpxProviderDescriptor {
                 "ACPX permission mode must be pinned by runner policy",
             ));
         }
-        if self.run_id != context.run_id
-            || self.normalized_session_id != context.normalized_session_id
-        {
+        if self.normalized_session_id != context.normalized_session_id {
             return Err(DurableRunnerError::invalid(
                 "ACPX descriptor identity conflicts with the durable runner identity",
+            ));
+        }
+        if self.run_id.is_empty()
+            || self.run_id.len() > 160
+            || !self.run_id.bytes().all(|value| {
+                value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b':' | b'-')
+            })
+        {
+            return Err(DurableRunnerError::invalid(
+                "ACPX descriptor run identity is malformed",
             ));
         }
         if self.instructions.len() > 1024 * 1024 || self.instructions.contains('\0') {
@@ -171,6 +182,16 @@ impl AcpxProviderDescriptor {
         if !self.runtime_context.is_null() && !self.runtime_context.is_object() {
             return Err(DurableRunnerError::invalid(
                 "ACPX runtimeContext must be an object or null",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate(&self, context: &AcpxEventProjectionContext) -> Result<(), DurableRunnerError> {
+        self.validate_session(context)?;
+        if self.run_id != context.run_id {
+            return Err(DurableRunnerError::invalid(
+                "ACPX descriptor identity conflicts with the durable runner identity",
             ));
         }
         Ok(())
@@ -343,7 +364,12 @@ impl AcpxDurableState {
         context: &AcpxEventProjectionContext,
         expected_launch_profile_digest: &str,
     ) -> Result<(), DurableRunnerError> {
-        self.descriptor.validate(context)?;
+        // The normalized session is the durable provider boundary. A settled
+        // provider can outlive one heartbeat run and be attached to the next,
+        // so its persisted descriptor legitimately carries the prior run ID
+        // until run.attach rotates authority. Fresh command descriptors still
+        // use validate(), which binds them to the current run.
+        self.descriptor.validate_session(context)?;
         if self.launch_profile_digest != expected_launch_profile_digest {
             return Err(DurableRunnerError::invalid(
                 "ACPX durable launch profile digest does not match runner startup",
@@ -525,6 +551,12 @@ impl AcpxCommandExecutor {
         let Some(state) = self.state.as_ref() else {
             return Ok(());
         };
+        // A replacement runner for a new heartbeat run must first execute
+        // run.attach. Do not restart the provider under the prior run authority
+        // or emit prior-run events into the new run while attachment is pending.
+        if state.descriptor.run_id != self.context.run_id {
+            return Ok(());
+        }
         if !matches!(
             state.lifecycle.as_str(),
             "session_open" | "turn_starting" | "turn_active" | "suspended"
@@ -1106,6 +1138,16 @@ impl AcpxCommandExecutor {
 impl CommandExecutor for AcpxCommandExecutor {
     fn execute(&mut self, command: &Command) -> Result<CommandExecution, DurableRunnerError> {
         self.restore()?;
+        if command.command_type != "run.attach"
+            && self
+                .state
+                .as_ref()
+                .is_some_and(|state| state.descriptor.run_id != self.context.run_id)
+        {
+            return Err(DurableRunnerError::invalid(
+                "ACPX durable session requires run.attach before commands from a new run",
+            ));
+        }
         match command.command_type.as_str() {
             "run.prepare" => self.prepare(&command.payload),
             "run.attach" => {
@@ -1153,6 +1195,14 @@ impl CommandExecutor for AcpxCommandExecutor {
     }
 
     fn poll_events(&mut self) -> Result<Vec<PolledEvent>, DurableRunnerError> {
+        self.restore()?;
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.descriptor.run_id != self.context.run_id)
+        {
+            return Ok(Vec::new());
+        }
         self.poll_provider()?;
         Ok(self
             .state
@@ -1544,6 +1594,102 @@ mod tests {
         value["sidecarArgs"] = json!([]);
         let descriptor: AcpxProviderDescriptor = serde_json::from_value(value).unwrap();
         assert!(descriptor.verified_transport(Some(&profile)).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_settled_session_for_explicit_run_attachment_only() {
+        let directory = temporary_directory("cross-run-attach");
+        let runtime = directory.join("runtime");
+        let workspace = directory.join("workspace");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = directory.join("provider-started");
+        let command = directory.join("sidecar");
+        write_artifact(
+            &command,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()).as_bytes(),
+            true,
+        );
+        let launch_profile = AcpxLaunchProfile {
+            authority_digest: format!("sha256:{}", "d".repeat(64)),
+            command: command.clone(),
+            args: Vec::new(),
+            artifacts: vec![artifact(&command)],
+        };
+        let mut descriptor_value = descriptor("codex");
+        descriptor_value["sidecarCommand"] = json!(command);
+        descriptor_value["sidecarArgs"] = json!([]);
+        descriptor_value["runtimeDirectory"] = json!(runtime);
+        descriptor_value["cwd"] = json!(workspace);
+        let original_descriptor: AcpxProviderDescriptor =
+            serde_json::from_value(descriptor_value.clone()).unwrap();
+        let identity = AcpxProviderSessionIdentity {
+            kind: "acpx".to_owned(),
+            normalized_session_id: "session-1".to_owned(),
+            acpx_record_id: "record-1".to_owned(),
+            backend_session_id: "backend-1".to_owned(),
+            agent_session_id: "agent-1".to_owned(),
+            profile_digest: original_descriptor.command_digest.clone(),
+            workspace_digest: format!("sha256:{}", "a".repeat(64)),
+            requested_model: original_descriptor.model.clone(),
+            effective_model: original_descriptor.model.clone(),
+            permission_mode: Some(original_descriptor.permission_mode),
+            provider_lifetime_fence_candidates: [60_001, 60_002, 60_003],
+        };
+        let operations = Vec::new();
+        let tool_set = AuthorizedToolSet {
+            schema: TOOL_SET_SCHEMA.to_owned(),
+            schema_version: 1,
+            catalog_digest: authorized_tool_catalog_digest(&operations).unwrap(),
+            operations,
+        };
+        let launch_profile_digest = launch_profile.canonical_digest().unwrap();
+        let mut state = AcpxDurableState::new(original_descriptor, tool_set, launch_profile_digest);
+        state.lifecycle = "suspended".to_owned();
+        state.identity = Some(identity);
+        let original_config = test_config(&directory, Some(launch_profile.clone()));
+        let mut original = AcpxCommandExecutor::with_runner_config(&directory, &original_config);
+        original.state = Some(state);
+        original.save_state().unwrap();
+
+        let mut wrong_session_config = original_config.clone();
+        wrong_session_config.run_id = "run-2".to_owned();
+        wrong_session_config.normalized_session_id = "session-2".to_owned();
+        let mut wrong_session =
+            AcpxCommandExecutor::with_runner_config(&directory, &wrong_session_config);
+        assert!(wrong_session.restore().is_err());
+
+        let mut attached_config = original_config.clone();
+        attached_config.run_id = "run-2".to_owned();
+        let mut attached = AcpxCommandExecutor::with_runner_config(&directory, &attached_config);
+        attached.restore().unwrap();
+        assert!(!marker.exists());
+        let non_attach_error = attached
+            .execute(&Command {
+                schema: "paperclip.prp.command.v1".to_owned(),
+                command_id: "command-before-attach".to_owned(),
+                controller_seq: 1,
+                command_type: "session.snapshot".to_owned(),
+                issued_at: "2026-09-01T00:00:00.000Z".to_owned(),
+                deadline_at: None,
+                precondition: None,
+                payload: json!({}),
+            })
+            .unwrap_err();
+        assert!(non_attach_error
+            .to_string()
+            .contains("requires run.attach before commands from a new run"));
+
+        descriptor_value["runId"] = json!("run-2");
+        attached
+            .attach_run(&json!({"provider": descriptor_value}))
+            .unwrap();
+        assert_eq!(attached.state.as_ref().unwrap().descriptor.run_id, "run-2");
+        assert!(!marker.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
