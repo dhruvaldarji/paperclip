@@ -18,6 +18,7 @@ const {
   resolveCommandForLogs,
   prepareAdapterExecutionTargetRuntime,
   startAdapterExecutionTargetPaperclipBridge,
+  assertManagedCredentialHome,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
     exitCode: 0,
@@ -32,6 +33,10 @@ const {
   resolveCommandForLogs: vi.fn(async () => "/usr/bin/codex"),
   prepareAdapterExecutionTargetRuntime: vi.fn(),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => null),
+  // Wraps the real `assertManagedCredentialHome` by default (set below, once
+  // the actual module is available); a test overrides it for one call with
+  // `mockRejectedValueOnce` to simulate an operational guard failure.
+  assertManagedCredentialHome: vi.fn(),
 }));
 
 vi.mock("@paperclipai/adapter-utils/server-utils", async () => {
@@ -54,6 +59,17 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ...actual,
     prepareAdapterExecutionTargetRuntime,
     startAdapterExecutionTargetPaperclipBridge,
+  };
+});
+
+vi.mock("@paperclipai/adapter-utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/adapter-utils")>();
+  // Default implementation is the real guard; a test overrides it once with
+  // `assertManagedCredentialHome.mockRejectedValueOnce(...)`.
+  assertManagedCredentialHome.mockImplementation(actual.assertManagedCredentialHome);
+  return {
+    ...actual,
+    assertManagedCredentialHome,
   };
 });
 
@@ -83,9 +99,12 @@ prepareAdapterExecutionTargetRuntime.mockImplementation(async (input: { assets?:
   };
 });
 
+const COPYBACK_COMPANY_ID = "company-1";
+
 describe("codex execute — outbound auth copy-back restore contribution", () => {
   const cleanupDirs: string[] = [];
   let savedCodexHomeEnv: string | undefined;
+  let savedPaperclipHomeEnv: string | undefined;
 
   afterEach(async () => {
     vi.clearAllMocks();
@@ -93,6 +112,11 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       delete process.env.CODEX_HOME;
     } else {
       process.env.CODEX_HOME = savedCodexHomeEnv;
+    }
+    if (savedPaperclipHomeEnv === undefined) {
+      delete process.env.PAPERCLIP_HOME;
+    } else {
+      process.env.PAPERCLIP_HOME = savedPaperclipHomeEnv;
     }
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
@@ -120,14 +144,19 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
   async function runTeardown(input: {
     sandboxAuth: string;
     hostAuth: string;
-  }): Promise<{ finalHostAuth: string; finalHostMode: number }> {
+  }): Promise<{ finalHostAuth: string; finalHostMode: number; logs: string[] }> {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-e2e-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
-    // The shared host home is what `resolveSharedCodexHomeDir` returns
-    // (process.env.CODEX_HOME) — the copy-back target. Point it at a tmp dir so
-    // the round-trip never touches the real host credential.
-    const sharedHostHome = path.join(rootDir, "shared-codex-home");
+    // The copy-back guard requires its target to sit under the Paperclip-
+    // managed company tree (`<PAPERCLIP_HOME>/instances/default/companies/<id>`),
+    // so this points PAPERCLIP_HOME at a tmp dir and places the shared host home
+    // — what `resolveSharedCodexHomeDir` returns via process.env.CODEX_HOME, and
+    // the copy-back target — inside that company's managed tree. The round-trip
+    // never touches the real host credential.
+    const paperclipHome = path.join(rootDir, "paperclip-home");
+    const companyDir = path.join(paperclipHome, "instances", "default", "companies", COPYBACK_COMPANY_ID);
+    const sharedHostHome = path.join(companyDir, "codex-home");
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(sharedHostHome, { recursive: true });
     const hostAuthPath = path.join(sharedHostHome, "auth.json");
@@ -135,13 +164,17 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
 
     savedCodexHomeEnv = process.env.CODEX_HOME;
     process.env.CODEX_HOME = sharedHostHome;
+    savedPaperclipHomeEnv = process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = paperclipHome;
     sandboxAuthFixture.bytes = Buffer.from(input.sandboxAuth, "utf8");
+
+    const logs: string[] = [];
 
     await execute({
       runId: "run-copyback-e2e",
       agent: {
         id: "agent-1",
-        companyId: "company-1",
+        companyId: COPYBACK_COMPANY_ID,
         name: "CodexCoder",
         adapterType: "codex_local",
         adapterConfig: {},
@@ -150,8 +183,9 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       config: {
         command: "codex",
         engine: "cli",
-        // External CODEX_HOME (outside the managed company tree) so no managed
-        // seeding rewrites auth.json before teardown; equals the shared host home.
+        // A configured CODEX_HOME equal to process.env.CODEX_HOME (the shared
+        // source `resolveSharedCodexHomeDir` reads) makes managed seeding a
+        // self-copy no-op, so it never rewrites auth.json before teardown.
         env: { CODEX_HOME: sharedHostHome },
       },
       context: {
@@ -172,12 +206,15 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
           strictHostKeyChecking: true,
         },
       },
-      onLog: async () => {},
+      onLog: async (_stream, line) => {
+        logs.push(line);
+      },
     });
 
     return {
       finalHostAuth: await readFile(hostAuthPath, "utf8"),
       finalHostMode: (await lstat(hostAuthPath)).mode & 0o777,
+      logs,
     };
   }
 
@@ -230,5 +267,31 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       expect(result.finalHostAuth, entry.name).toBe(entry.hostAuth);
       expect(result.finalHostMode, entry.name).toBe(0o600);
     }
+  });
+
+  it("surfaces the real error instead of a misleading containment message when the managed-home guard fails operationally", async () => {
+    const sandboxAuth = subscriptionAuth({
+      accountId: "acct-op-error",
+      lastRefresh: "2026-07-09T02:00:00Z",
+      marker: "sandbox",
+    });
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-op-error",
+      lastRefresh: "2026-07-09T01:00:00Z",
+      marker: "host",
+    });
+
+    // A permission fault, an I/O error, or a symlink loop reading the guard's
+    // own directory tree is not a containment rejection: the copy-back must
+    // not treat it as benign "outside the managed tree" and must not silently
+    // keep the (stale) host credential without saying why.
+    const operationalError = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    assertManagedCredentialHome.mockRejectedValueOnce(operationalError);
+
+    const result = await runTeardown({ sandboxAuth, hostAuth });
+
+    expect(result.finalHostAuth).toBe(hostAuth);
+    expect(result.logs.some((line) => line.includes("EACCES: permission denied"))).toBe(true);
+    expect(result.logs.some((line) => line.includes("outside the managed directory tree"))).toBe(false);
   });
 });
