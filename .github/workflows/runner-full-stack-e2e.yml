@@ -66,11 +66,36 @@ jobs:
           ACTOR_ID: ${{ github.actor_id }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           ALLOWED_ACTOR_IDS: ${{ vars.RUNNER_E2E_ALLOWED_ACTOR_IDS }}
+          EVENT_NAME: ${{ github.event_name }}
+          SELECT_ALL: ${{ inputs.all }}
+          SELECT_ID: ${{ inputs.id }}
+          SELECT_GROUP: ${{ inputs.group }}
+          SELECT_NON_GROUP: ${{ format('{0}{1}{2}{3}{4}', inputs.id, inputs.suite, inputs.profile, inputs.environment, inputs.case) }}
+          SELECT_NON_ID: ${{ format('{0}{1}{2}{3}{4}', inputs.group, inputs.suite, inputs.profile, inputs.environment, inputs.case) }}
+          SELECTORS: ${{ format('{0}{1}{2}{3}{4}{5}', inputs.id, inputs.group, inputs.suite, inputs.profile, inputs.environment, inputs.case) }}
         run: |
           set -euo pipefail
+          validation_ref="refs/heads/validation/runner-local-integrity-e2e"
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
-            echo "Paid runner E2E campaigns may run only from the default branch." >&2
-            exit 1
+            if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "Non-default refs may run only from the pinned repair validation branch." >&2
+              exit 1
+            fi
+            if [ "${SELECT_ALL:-false}" = true ]; then
+              if [ -n "${SELECTORS:-}" ]; then
+                echo "The full validation matrix cannot be combined with narrower selectors." >&2
+                exit 1
+              fi
+            else
+              if [ "${SELECT_GROUP:-}" = local ] && [ -z "${SELECT_NON_GROUP:-}" ]; then
+                :
+              elif [ -n "${SELECT_ID:-}" ] && [ -z "${SELECT_NON_ID:-}" ]; then
+                :
+              else
+                echo "Non-default refs may run only the complete matrix, the local group, or explicit cell IDs." >&2
+                exit 1
+              fi
+            fi
           fi
           if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and floor == .)' <<< "${ALLOWED_ACTOR_IDS:-}" >/dev/null; then
             echo "RUNNER_E2E_ALLOWED_ACTOR_IDS must be a non-empty JSON array of numeric GitHub user IDs." >&2
@@ -548,9 +573,35 @@ jobs:
           ACTOR_ID: ${{ github.actor_id }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           ALLOWED_ACTOR_IDS: ${{ vars.RUNNER_E2E_ALLOWED_ACTOR_IDS }}
+          EXECUTION_ID: ${{ matrix.executionId }}
+          SELECT_ALL: ${{ inputs.all }}
+          SELECT_GROUP: ${{ inputs.group }}
+          SELECT_ID: ${{ inputs.id }}
         run: |
           set -euo pipefail
-          test "$REF" = "refs/heads/$DEFAULT_BRANCH"
+          if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            test "$REF" = "refs/heads/validation/runner-local-integrity-e2e"
+            if [ "${SELECT_ALL:-false}" != true ]; then
+              if [ "${SELECT_GROUP:-}" = local ]; then
+                case "$EXECUTION_ID" in
+                  *.local.*) ;;
+                  *) echo "Execution is outside the local validation group." >&2; exit 1 ;;
+                esac
+              else
+                selected=false
+                IFS=',' read -ra selected_ids <<< "${SELECT_ID:-}"
+                for selected_id in "${selected_ids[@]}"; do
+                  selected_id="${selected_id#"${selected_id%%[![:space:]]*}"}"
+                  selected_id="${selected_id%"${selected_id##*[![:space:]]}"}"
+                  if [ "$EXECUTION_ID" = "$selected_id" ]; then
+                    selected=true
+                    break
+                  fi
+                done
+                [ "$selected" = true ] || { echo "Execution is outside the explicitly selected validation cells." >&2; exit 1; }
+              fi
+            fi
+          fi
           jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and floor == .)' <<< "${ALLOWED_ACTOR_IDS:-}" >/dev/null
           triggering_actor_id="$(gh api "users/$TRIGGERING_ACTOR" --jq .id)"
           jq -e --argjson candidate "$triggering_actor_id" 'index($candidate) != null' <<< "$ALLOWED_ACTOR_IDS" >/dev/null
@@ -773,7 +824,11 @@ jobs:
   publish_history:
     name: Publish pruned immutable history and landing site
     needs: [catalog, report]
-    if: always() && needs.catalog.result == 'success' && needs.report.outputs.history_source_ready == 'true'
+    if: >-
+      always() &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.catalog.result == 'success' &&
+      needs.report.outputs.history_source_ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
