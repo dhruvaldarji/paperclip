@@ -1111,7 +1111,10 @@ function resolveBuildOwnedCliArtifact(
   );
 }
 
-function acpxProviderPackageRoot(sidecarScript: string): string {
+function acpxProviderPackageAuthority(sidecarScript: string): {
+  root: string;
+  manifest: string;
+} {
   const cliDirectory = dirname(sidecarScript);
   if (
     basename(sidecarScript) !== "acpx-runtime-sidecar.cjs" ||
@@ -1126,8 +1129,14 @@ function acpxProviderPackageRoot(sidecarScript: string): string {
   // A local source build consumes pnpm's workspace-owned node_modules tree.
   // A deployed provider pack owns a closed node_modules tree at its own root.
   return sidecarPackageRoot === packageRoot
-    ? resolve(packageRoot, "../..")
-    : sidecarPackageRoot;
+    ? {
+        root: resolve(packageRoot, "../.."),
+        manifest: resolve(packageRoot, "package.json"),
+      }
+    : {
+        root: sidecarPackageRoot,
+        manifest: resolve(sidecarPackageRoot, "package.json"),
+      };
 }
 
 function acpxRunnerLaunchProfile(
@@ -1342,6 +1351,8 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
       input.acpxSidecarPath ??
       input.options.acpxSidecarPath ??
       resolve(packageRoot, "dist", "cli", "acpx-runtime-sidecar.cjs");
+    const providerPackageAuthority =
+      acpxProviderPackageAuthority(sidecarPath);
     return {
       ...createSanitizedAcpxSpawnInput(
         input.options.environment,
@@ -1352,7 +1363,9 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
       // executes it through /proc/self/fd. Anchor its closed provider package
       // lookups at the package that owns the already-authenticated bundle.
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT:
-        acpxProviderPackageRoot(sidecarPath),
+        providerPackageAuthority.root,
+      PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
+        providerPackageAuthority.manifest,
       ...(input.options.providerRecoveryPolicy ===
       "allow_replacement_after_governed_wait"
         ? {
@@ -3413,7 +3426,7 @@ export const createRunnerdCodexTransport =
   createCapabilityRunnerdCodexTransport;
 
 export const runnerdLaunchProfileInternals = Object.freeze({
-  acpxProviderPackageRoot,
+  acpxProviderPackageAuthority,
   acpxRunnerLaunchProfile,
   resolveBuildOwnedCliArtifact,
 });

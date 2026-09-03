@@ -208,6 +208,8 @@ it("preserves the controller-selected ACPX provider package root", () => {
     environment: {
       PATH: "/bin",
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT: "/verified/provider-pack",
+      PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
+        "/verified/provider-pack/package.json",
       NODE_PATH: "/untrusted/modules",
     },
     processLauncher: (spec) => {
@@ -233,6 +235,9 @@ it("preserves the controller-selected ACPX provider package root", () => {
   expect(launches[0]!.environment.PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT).toBe(
     "/verified/provider-pack",
   );
+  expect(
+    launches[0]!.environment.PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST,
+  ).toBe("/verified/provider-pack/package.json");
   expect(launches[0]!.environment.NODE_PATH).toBeUndefined();
 });
 
