@@ -25,6 +25,10 @@ import {
 import type { Readable, Writable } from "node:stream";
 
 import type { QualifiedAcpxProfile } from "./qualified-profiles.js";
+import {
+  VERIFIED_RUNTIME_EXECUTABLE_ENV,
+  verifiedRuntimeExecutable,
+} from "./verified-runtime-executable.js";
 
 const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_COMMAND_BYTES = 16 * 1024 * 1024;
@@ -68,6 +72,7 @@ export const PROVIDER_LIFETIME_GUARDIAN_SOURCE = `
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const WATCHDOG_SOURCE = ${JSON.stringify(PROVIDER_LIFETIME_WATCHDOG_SOURCE)};
+const runtimeExecutable = process.env.${VERIFIED_RUNTIME_EXECUTABLE_ENV} || process.execPath;
 const dependencyAncestorCount = Number.parseInt(process.argv[4], 10);
 if (!Number.isSafeInteger(dependencyAncestorCount) || dependencyAncestorCount < 0 || dependencyAncestorCount > ${MAX_DEPENDENCY_ANCESTORS}) throw new Error("ACPX provider dependency ancestry is invalid");
 const OWNER_FD = ${DEPENDENCY_ANCESTOR_FD_START} + dependencyAncestorCount;
@@ -112,7 +117,7 @@ const startProvider = () => {
   if (provider || reaped || shutdownStarted) return;
   try {
     provider = spawn(
-      process.execPath,
+      runtimeExecutable,
       ["--eval", process.argv[1], ...process.argv.slice(2)],
       {
         cwd: process.cwd(),
@@ -152,7 +157,7 @@ try {
   // its live identity if this guardian is killed before it can run its reap.
   // Its private owner pipe reaches kernel EOF on guardian death even while the
   // provider is stopped and unable to process its own guardian-loss callback.
-  watchdog = spawn(process.execPath, ["--eval", WATCHDOG_SOURCE], {
+  watchdog = spawn(runtimeExecutable, ["--eval", WATCHDOG_SOURCE], {
     cwd: process.cwd(),
     detached: false,
     env: {},
@@ -843,8 +848,11 @@ function commandLease(
         ) {
           throw new Error("ACPX provider credential fence is invalid");
         }
+        const runtimeExecutable = verifiedRuntimeExecutable();
+        const environment = sanitizedNodeEnvironment(options.env);
+        environment[VERIFIED_RUNTIME_EXECUTABLE_ENV] = runtimeExecutable;
         child = spawnChildProcess(
-          process.execPath,
+          runtimeExecutable,
           guarded
             ? [
                 // Keep resolved module URLs on the retained descriptor paths
@@ -880,7 +888,7 @@ function commandLease(
             // both credential quorum listeners inherited, and pins the PGID
             // until its single whole-group reap.
             detached: process.platform !== "win32",
-            env: sanitizedNodeEnvironment(options.env),
+            env: environment,
             shell: false,
             stdio: guarded
               ? [
