@@ -383,13 +383,11 @@ export async function prepareAcpxRuntimeSandbox(input: {
         // Codex shell snapshots serialize the provider process environment.
         // The ACPX sidecar receives a short-lived managed credential only so
         // it can authenticate the provider; that value must never become
-        // durable runtime state or enter a model-invoked shell.
+        // durable runtime state. Keep this identical to the proven native
+        // Codex isolation policy: broader shell-environment filtering can
+        // also affect provider startup and belongs at the launch boundary.
         "[features]",
         "shell_snapshot = false",
-        "",
-        "[shell_environment_policy]",
-        'exclude = ["OPENAI_API_KEY", "CODEX_API_KEY"]',
-        "ignore_default_excludes = false",
         "",
       ].join("\n"),
     );

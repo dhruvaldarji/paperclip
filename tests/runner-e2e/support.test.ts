@@ -677,7 +677,7 @@ describe("runner E2E evidence redaction", () => {
     ).resolves.toMatchObject({ file: forbiddenConfig });
   });
 
-  it("recognizes both managed and durable-session Codex runtime auth files", () => {
+  it("recognizes managed and durable Codex runtime auth files", () => {
     const root = path.join(os.tmpdir(), "paperclip-home");
     expect(
       isEphemeralCodexRuntimeAuthFile(
@@ -685,6 +685,15 @@ describe("runner E2E evidence redaction", () => {
         path.join(
           root,
           "instances/instance-1/companies/company-1/agents/agent-1/codex-home/auth.json",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isEphemeralCodexRuntimeAuthFile(
+        root,
+        path.join(
+          root,
+          "instances/instance-1/runtime/paperclip-runner/acpx/acpx/session-1/codex-home/auth.json",
         ),
       ),
     ).toBe(true);
