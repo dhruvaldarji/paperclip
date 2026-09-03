@@ -107,9 +107,9 @@ describe("public repository paid workflow security", () => {
       fullStack.match(
         /ref: \$\{\{ needs\.authorize\.outputs\.target_sha \}\}/g,
       ),
-    ).toHaveLength(3);
+    ).toHaveLength(5);
     expect(fullStack.match(/ref: \$\{\{ github\.sha \}\}/g)).toHaveLength(2);
-    expect(fullStack.match(/persist-credentials: false/g)).toHaveLength(5);
+    expect(fullStack.match(/persist-credentials: false/g)).toHaveLength(7);
     expect(fullStack).not.toContain("ref: ${{ inputs.target_branch }}");
     expect(fullStack).toContain(
       "PAPERCLIP_RUNNER_SOURCE_REVISION=${TARGET_SHA}",
