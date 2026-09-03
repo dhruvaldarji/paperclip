@@ -66,16 +66,14 @@ jobs:
         run: |
           set -euo pipefail
           validation_ref="refs/heads/validation/runner-local-integrity-e2e"
-          validation_acpx_codex="core-compatibility.runner-acpx-codex.local.message-marker"
-          validation_native_codex="core-compatibility.runner-codex.local.message-marker"
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
             if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ] || [ "${SELECT_ALL:-false}" = true ]; then
               echo "Non-default refs may run only the pinned scoped repair matrix from the validation branch." >&2
               exit 1
             fi
             case "${SELECT_ID:-}" in
-              "$validation_acpx_codex"|"$validation_native_codex") ;;
-              *) echo "Non-default refs may run only one pinned Codex validation cell." >&2; exit 1 ;;
+              core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
+              *) echo "Non-default refs may run only one pinned scoped validation cell." >&2; exit 1 ;;
             esac
           fi
           if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and floor == .)' <<< "${ALLOWED_ACTOR_IDS:-}" >/dev/null; then
