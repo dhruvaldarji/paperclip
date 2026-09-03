@@ -211,13 +211,15 @@ describe("ACPX runtime host", () => {
     expect(createRuntime).not.toHaveBeenCalled();
     expect(fixture.commandClose).toHaveBeenCalledOnce();
     const authPath = join(credentialHome, "auth.json");
-    const contender = await vi.waitFor(() =>
-      stageManagedCodexCredential({
-        agentHomeDirectory: credentialHome,
-        environment: {
-          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
-        },
-      }),
+    const contender = await vi.waitFor(
+      () =>
+        stageManagedCodexCredential({
+          agentHomeDirectory: credentialHome,
+          environment: {
+            PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
+          },
+        }),
+      { timeout: 5_000 },
     );
     await contender.close();
     await expect(readFile(authPath)).rejects.toMatchObject({ code: "ENOENT" });

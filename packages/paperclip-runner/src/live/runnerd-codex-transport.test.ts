@@ -2103,6 +2103,12 @@ it("persists an active provider as settled before bounded suspension", async () 
     await bundle.transport.request("turn/start", {
       input: [{ type: "text", text: "Wait for another instruction." }],
     });
+    const notifications = bundle.transport
+      .notifications()
+      [Symbol.asyncIterator]();
+    await expect(notifications.next()).resolves.toMatchObject({
+      value: { method: "turn/started" },
+    });
     await bundle.transport.close();
 
     const providerState = JSON.parse(
