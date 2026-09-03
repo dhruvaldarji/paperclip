@@ -297,7 +297,7 @@ jobs:
   test:
     name: ${{ matrix.executionId }}
     needs: [catalog, daytona_image]
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeoutMinutes }}
     permissions:
       contents: read
