@@ -604,12 +604,18 @@ describe("ACPX runtime host", () => {
         code: "ENOENT",
       });
     });
-    const contender = await stageManagedCodexCredential({
-      agentHomeDirectory: credentialHome,
-      environment: {
-        PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
-      },
-    });
+    // File removal precedes kernel lease release. Wait for the lease itself so
+    // this assertion cannot race between those two ordered cleanup steps.
+    const contender = await vi.waitFor(
+      () =>
+        stageManagedCodexCredential({
+          agentHomeDirectory: credentialHome,
+          environment: {
+            PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
+          },
+        }),
+      { timeout: 5_000 },
+    );
     await contender.close();
   });
 
