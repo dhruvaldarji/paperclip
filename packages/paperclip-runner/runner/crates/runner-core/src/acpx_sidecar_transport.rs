@@ -651,23 +651,6 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "ERR_ACPX_UNVERIFIED_MODULE" => return "diagnostic_unverified_module",
         "ETIMEDOUT" => return "diagnostic_timed_out",
         "acpx_sidecar_command_failed" => return "diagnostic_uncoded_sidecar_failure",
-        "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_TIMEOUT" => {
-            return "diagnostic_guardian_ownership_timeout"
-        }
-        "DIAGNOSTIC_ACPX_GUARDIAN_EXITED_BEFORE_OWNERSHIP" => {
-            return "diagnostic_guardian_exited_before_ownership"
-        }
-        "DIAGNOSTIC_ACPX_GUARDIAN_START_FAILED" => return "diagnostic_guardian_start_failed",
-        "DIAGNOSTIC_ACPX_GUARDIAN_OWNERSHIP_PIPE_MISSING" => {
-            return "diagnostic_guardian_ownership_pipe_missing"
-        }
-        "DIAGNOSTIC_ACPX_CREDENTIAL_OWNERSHIP_LOST" => {
-            return "diagnostic_credential_ownership_lost"
-        }
-        "DIAGNOSTIC_ACPX_CREDENTIAL_OWNER_INVALID" => return "diagnostic_credential_owner_invalid",
-        "DIAGNOSTIC_ACPX_PROVIDER_EXIT_PROOF_MISSING" => {
-            return "diagnostic_provider_exit_proof_missing"
-        }
         "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT" => {
             return "runtime_admission_verification_timeout"
         }
