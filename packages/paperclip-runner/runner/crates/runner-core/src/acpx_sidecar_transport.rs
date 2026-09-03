@@ -618,6 +618,7 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "SESSION_MODEL_REPLAY_FAILED" => return "session_model_replay_failed",
         "SESSION_CONFIG_OPTION_REPLAY_FAILED" => return "session_config_option_replay_failed",
         "CLAUDE_ACP_SESSION_CREATE_TIMEOUT" => return "claude_session_create_timeout",
+        "ACPX_SESSION_HANDSHAKE_TIMEOUT" => return "session_handshake_timeout",
         _ => {}
     }
     match error.message.as_str() {
@@ -703,6 +704,13 @@ mod tests {
             response_error_classification(&error(
                 "acpx_sidecar_command_failed",
                 "ACPX session handshake exceeded its admission deadline",
+            )),
+            "session_handshake_timeout"
+        );
+        assert_eq!(
+            response_error_classification(&error(
+                "ACPX_SESSION_HANDSHAKE_TIMEOUT",
+                "bounded provider admission failed",
             )),
             "session_handshake_timeout"
         );
