@@ -151,8 +151,8 @@ describe("runner E2E campaign history", () => {
     expect(index).toContain("Runner E2E campaigns");
     expect(index).toContain("complete-green");
     expect(index).toContain("complete-red");
-    expect(index).toContain("68/68 passed");
-    expect(index).toContain("67/68 passed");
+    expect(index).toContain("67/67 passed");
+    expect(index).toContain("66/67 passed");
     expect(index).toContain("Open report&nbsp;→");
     expect(index).toContain(
       "Visual evidence remains in access-controlled workflow artifacts",
