@@ -1128,7 +1128,8 @@ for (const execution of executions) {
         planLifecycleEvidence = { interaction, plan };
       }
 
-      const terminal = await pollUntil({
+      const taskMatchers = execution.task.buildMatchers(nonce, execution);
+      let terminal = await pollUntil({
         label: `issue ${issue.id} and heartbeat run terminal state`,
         deadlineAt,
         load: loadTaskState,
@@ -1138,6 +1139,32 @@ for (const execution of executions) {
           taskRuns.every((run) => TERMINAL_RUN_STATUSES.has(run.status)),
         reject: ({ taskRuns }) => definitiveRunFailure(taskRuns),
       });
+
+      // Finalization commits the issue/run decision before the derived agent
+      // comment is guaranteed to be visible through the comments endpoint.
+      // Give that projection a short consistency window so a successful
+      // terminal response is not misclassified as an empty provider reply.
+      // If no comment arrives, retain the original terminal observation and
+      // let the ordinary message matcher report the product failure.
+      if (taskMatchers.some((matcher) => matcher.kind.startsWith("message_"))) {
+        terminal = await pollUntil({
+          label: `final agent comment for issue ${issue.id}`,
+          deadlineAt: Math.min(deadlineAt, Date.now() + 30_000),
+          load: loadTaskState,
+          accept: ({ taskRuns, comments }) => {
+            if (taskRuns.length !== execution.task.expectedRunCount) {
+              return false;
+            }
+            const finalRun = sortRunsChronologically(taskRuns).at(-1);
+            return comments.some(
+              (comment) =>
+                comment.createdByRunId === finalRun?.id &&
+                comment.authorAgentId === fixtures!.agent.id,
+            );
+          },
+          reject: ({ taskRuns }) => definitiveRunFailure(taskRuns),
+        }).catch(() => terminal);
+      }
 
       issue = terminal.currentIssue;
       selectedRuns = terminal.taskRuns;
@@ -1386,7 +1413,7 @@ for (const execution of executions) {
         },
       };
       matcherResults = await Promise.all(
-        execution.task.buildMatchers(nonce, execution).map((matcher) =>
+        taskMatchers.map((matcher) =>
           evaluateMatcher(matcher, {
             ...matcherObservation,
             // Multi-run tasks intentionally retain earlier waiting/revision
