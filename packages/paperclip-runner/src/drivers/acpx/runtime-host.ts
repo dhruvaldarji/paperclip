@@ -249,15 +249,18 @@ export class AcpxRuntimeHost {
       );
     }
     const profile = resolveQualifiedAcpxProfile(options.agent, options.model);
-    const binding = await runAbortableAdmissionStage(options.signal, () =>
-      createAcpxRecoveryBinding({
-        runtimeDirectory: options.runtimeDirectory,
-        normalizedSessionId: options.normalizedSessionId,
-        workingDirectory: options.workingDirectory,
-        profile,
-        requestedModel: options.model,
-        permissionMode: options.permissionMode,
-      }),
+    const binding = await runAbortableAdmissionStage(
+      options.signal,
+      () =>
+        createAcpxRecoveryBinding({
+          runtimeDirectory: options.runtimeDirectory,
+          normalizedSessionId: options.normalizedSessionId,
+          workingDirectory: options.workingDirectory,
+          profile,
+          requestedModel: options.model,
+          permissionMode: options.permissionMode,
+        }),
+      "recovery_binding",
     );
     if (options.expectedIdentity) {
       verifyExpectedAcpxIdentity(options.expectedIdentity, binding, null);
@@ -272,10 +275,13 @@ export class AcpxRuntimeHost {
       );
     }
 
-    const installation = await runAbortableAdmissionStage(options.signal, () =>
-      (dependencies.verifyInstallation ?? verifyQualifiedAcpxInstallation)(
-        profile,
-      ),
+    const installation = await runAbortableAdmissionStage(
+      options.signal,
+      () =>
+        (dependencies.verifyInstallation ?? verifyQualifiedAcpxInstallation)(
+          profile,
+        ),
+      "installation",
     );
     if (installation.commandDigest !== profile.commandDigest) {
       throw new Error("Verified ACPX installation does not match its profile");
@@ -322,12 +328,15 @@ export class AcpxRuntimeHost {
       retainRuntimeHostCleanup(ownedCleanup);
     };
     try {
-      const sandbox = await runAbortableAdmissionStage(options.signal, () =>
-        prepareAcpxRuntimeSandbox({
-          binding,
-          agent: options.agent,
-          environment: options.environment,
-        }),
+      const sandbox = await runAbortableAdmissionStage(
+        options.signal,
+        () =>
+          prepareAcpxRuntimeSandbox({
+            binding,
+            agent: options.agent,
+            environment: options.environment,
+          }),
+        "sandbox",
       );
       if (options.agent === "codex") {
         credential = await acquireAbortableAdmissionResource({
@@ -443,6 +452,7 @@ export class AcpxRuntimeHost {
             profile,
             admissionVerificationTimeoutMs,
           ),
+        "verification",
       );
       const observedIdentity: AcpxExpectedSessionIdentity = {
         kind: "acpx",
@@ -629,11 +639,16 @@ export class AcpxRuntimeHost {
 async function runAbortableAdmissionStage<T>(
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
+  stage: string,
 ): Promise<T> {
-  if (signal === undefined) return await operation();
-  signal.throwIfAborted();
-  const pending = Promise.resolve().then(operation);
-  return await raceAdmissionWithAbort(pending, signal);
+  try {
+    if (signal === undefined) return await operation();
+    signal.throwIfAborted();
+    const pending = Promise.resolve().then(operation);
+    return await raceAdmissionWithAbort(pending, signal);
+  } catch (error) {
+    throw attachAcpxAdmissionStage(error, stage);
+  }
 }
 
 async function acquireAbortableAdmissionResource<T>(input: {
@@ -644,7 +659,13 @@ async function acquireAbortableAdmissionResource<T>(input: {
   onAbortedPending?: (pending: Promise<T>) => void;
   reportFailure: (failure: AcpxRetainedCleanupFailure) => void;
 }): Promise<T> {
-  if (input.signal === undefined) return await input.acquire();
+  if (input.signal === undefined) {
+    try {
+      return await input.acquire();
+    } catch (error) {
+      throw attachAcpxAdmissionStage(error, input.resource);
+    }
+  }
   input.signal.throwIfAborted();
   const pending = Promise.resolve().then(input.acquire);
   try {
@@ -666,7 +687,29 @@ async function acquireAbortableAdmissionResource<T>(input: {
         );
       }
     }
-    throw error;
+    throw attachAcpxAdmissionStage(error, input.resource);
+  }
+}
+
+function attachAcpxAdmissionStage(error: unknown, stage: string): Error {
+  const normalized =
+    error instanceof Error
+      ? error
+      : new Error("ACPX admission rejected a non-error");
+  try {
+    Object.defineProperty(normalized, "paperclipAcpxAdmissionStage", {
+      configurable: true,
+      enumerable: false,
+      value: stage,
+    });
+    return normalized;
+  } catch {
+    return Object.assign(
+      new Error("ACPX admission stage failed", { cause: normalized }),
+      {
+        paperclipAcpxAdmissionStage: stage,
+      },
+    );
   }
 }
 
