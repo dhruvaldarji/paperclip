@@ -330,13 +330,13 @@ export function FailedRunInboxRow({
                 onClick={onMarkRead}
                 className={cn(
                   "inline-flex h-4 w-4 items-center justify-center rounded-full transition-colors",
-                  "hover:bg-blue-500/20",
+                  "hover:bg-(--status-task-in_progress)/20",
                 )}
                 aria-label="Mark as read"
               >
                 <span className={cn(
                   "block h-2 w-2 rounded-full transition-opacity duration-300",
-                  "bg-blue-600 dark:bg-blue-400",
+                  "bg-(--status-task-in_progress)",
                   unreadState === "fading" ? "opacity-0" : "opacity-100",
                 )} />
               </button>
@@ -479,13 +479,13 @@ function ApprovalInboxRow({
                 onClick={onMarkRead}
                 className={cn(
                   "inline-flex h-4 w-4 items-center justify-center rounded-full transition-colors",
-                  "hover:bg-blue-500/20",
+                  "hover:bg-(--status-task-in_progress)/20",
                 )}
                 aria-label="Mark as read"
               >
                 <span className={cn(
                   "block h-2 w-2 rounded-full transition-opacity duration-300",
-                  "bg-blue-600 dark:bg-blue-400",
+                  "bg-(--status-task-in_progress)",
                   unreadState === "fading" ? "opacity-0" : "opacity-100",
                 )} />
               </button>
@@ -526,7 +526,7 @@ function ApprovalInboxRow({
               <>
                 <Button
                   size="sm"
-                  className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                  className="h-8 bg-(--status-task-icon-done) px-3 text-white hover:bg-(--status-task-done)"
                   onClick={onApprove}
                   disabled={isPending}
                 >
@@ -550,7 +550,7 @@ function ApprovalInboxRow({
         <div className="mt-3 flex gap-2 sm:hidden">
           <Button
             size="sm"
-            className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+            className="h-8 bg-(--status-task-icon-done) px-3 text-white hover:bg-(--status-task-done)"
             onClick={onApprove}
             disabled={isPending}
           >
@@ -612,13 +612,13 @@ function JoinRequestInboxRow({
                 onClick={onMarkRead}
                 className={cn(
                   "inline-flex h-4 w-4 items-center justify-center rounded-full transition-colors",
-                  "hover:bg-blue-500/20",
+                  "hover:bg-(--status-task-in_progress)/20",
                 )}
                 aria-label="Mark as read"
               >
                 <span className={cn(
                   "block h-2 w-2 rounded-full transition-opacity duration-300",
-                  "bg-blue-600 dark:bg-blue-400",
+                  "bg-(--status-task-in_progress)",
                   unreadState === "fading" ? "opacity-0" : "opacity-100",
                 )} />
               </button>
@@ -649,7 +649,7 @@ function JoinRequestInboxRow({
           ) : null}
           <Button
             size="sm"
-            className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+            className="h-8 bg-(--status-task-icon-done) px-3 text-white hover:bg-(--status-task-done)"
             onClick={onApprove}
             disabled={isPending}
           >
@@ -669,7 +669,7 @@ function JoinRequestInboxRow({
       <div className="mt-3 flex gap-2 sm:hidden">
         <Button
           size="sm"
-          className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+          className="h-8 bg-(--status-task-icon-done) px-3 text-white hover:bg-(--status-task-done)"
           onClick={onApprove}
           disabled={isPending}
         >
