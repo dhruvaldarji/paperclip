@@ -47,6 +47,7 @@ import {
   rehydrateRunnerdUsageNotification,
   rehydrateRunnerdWorkspaceChangeNotification,
   runnerdLaunchProfileInternals,
+  runnerdRecoveryInternals,
   resolveRunnerdAcpxPermissionMode,
   resolveRunnerdSessionIdentity,
   resolveSourceCodexHome,
@@ -55,6 +56,40 @@ import {
   unwrapRunnerdProviderNotifications,
   withCodexCollaborationRuntimeInstructions,
 } from "./runnerd-codex-transport.js";
+
+it("replays the durable run attachment outcome and latest provider identity", () => {
+  expect(
+    runnerdRecoveryInternals.recoveredRunAttachment({
+      commands: [
+        { commandId: "prepare", type: "run.prepare", status: "completed" },
+        { commandId: "attach", type: "run.attach", status: "failed" },
+      ],
+      committedEvents: [{ eventType: "session.started" }],
+    }),
+  ).toEqual({
+    commandId: "attach",
+    status: "failed",
+    providerIdentityEventIndex: -1,
+  });
+
+  expect(
+    runnerdRecoveryInternals.recoveredRunAttachment({
+      commands: [
+        { commandId: "attach", type: "run.attach", status: "completed" },
+      ],
+      committedEvents: [
+        { eventType: "runner.reconciled" },
+        { eventType: "session.started" },
+        { eventType: "runner.diagnostic" },
+        { eventType: "session.resumed" },
+      ],
+    }),
+  ).toEqual({
+    commandId: "attach",
+    status: "completed",
+    providerIdentityEventIndex: 3,
+  });
+});
 
 it("keeps ACPX terminal tools under the reserved runner-owned catalog", () => {
   const tools = [

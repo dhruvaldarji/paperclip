@@ -63,9 +63,7 @@ import {
 // URL directory conversion preserves a trailing separator while path-derived
 // build artifacts do not. Normalize once so a source build cannot be
 // misclassified as an external provider pack by a string-only comparison.
-const packageRoot = resolve(
-  fileURLToPath(new URL("../..", import.meta.url)),
-);
+const packageRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const MAX_NOTIFICATION_COUNT = 2_048;
 const MAX_NOTIFICATION_BYTES = 4 * 1024 * 1024;
@@ -291,6 +289,43 @@ function rotatedRunAttachPayload(
     };
   }
   return payload;
+}
+
+function recoveredRunAttachment(state: {
+  commands: readonly {
+    commandId: string;
+    type: string;
+    status: string;
+  }[];
+  committedEvents: readonly { eventType: string }[];
+}): {
+  commandId: string;
+  status: string;
+  providerIdentityEventIndex: number;
+} | null {
+  const command = [...state.commands]
+    .reverse()
+    .find((candidate) => candidate.type === "run.attach");
+  if (!command) return null;
+  let providerIdentityEventIndex = -1;
+  if (command.status === "completed") {
+    for (let index = state.committedEvents.length - 1; index >= 0; index -= 1) {
+      const eventType = state.committedEvents[index]?.eventType;
+      if (
+        eventType === "harness.ready" ||
+        eventType === "session.started" ||
+        eventType === "session.resumed"
+      ) {
+        providerIdentityEventIndex = index;
+        break;
+      }
+    }
+  }
+  return {
+    commandId: command.commandId,
+    status: command.status,
+    providerIdentityEventIndex,
+  };
 }
 
 function bridgedCodexQuestionParams(
@@ -1356,8 +1391,7 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
       input.acpxSidecarPath ??
       input.options.acpxSidecarPath ??
       resolve(packageRoot, "dist", "cli", "acpx-runtime-sidecar.cjs");
-    const providerPackageAuthority =
-      acpxProviderPackageAuthority(sidecarPath);
+    const providerPackageAuthority = acpxProviderPackageAuthority(sidecarPath);
     return {
       ...createSanitizedAcpxSpawnInput(
         input.options.environment,
@@ -1367,8 +1401,7 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
       // The verified sidecar bundle cannot use import.meta.url while Node
       // executes it through /proc/self/fd. Anchor its closed provider package
       // lookups at the package that owns the already-authenticated bundle.
-      PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT:
-        providerPackageAuthority.root,
+      PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT: providerPackageAuthority.root,
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
         providerPackageAuthority.manifest,
       ...(input.options.providerRecoveryPolicy ===
@@ -2678,7 +2711,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       connectionLeaseTtlMs: 60 * 60 * 1_000,
     });
     this.#core = core;
-    this.#eventIndex = core.store.state.committedEvents.length;
     if (rotatedAuthority) {
       core.queueCommand(
         "run.attach",
@@ -2690,6 +2722,18 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         ),
       );
     }
+    const committedEvents = core.store.state.committedEvents;
+    const runAttachment = recoveredRunAttachment(core.store.state);
+    // A controller retry can open the exact authority after run.attach has
+    // already reached a durable outcome. Re-observe that command instead of
+    // silently waiting for an identity that a failed command can never emit.
+    // If attachment completed, replay only its latest identity event into the
+    // transport's in-memory evidence; session events are consumed internally
+    // and are not duplicated onto the provider notification stream.
+    this.#eventIndex =
+      runAttachment !== null && runAttachment.providerIdentityEventIndex >= 0
+        ? runAttachment.providerIdentityEventIndex
+        : committedEvents.length;
     const registration = this.options.controlPlaneRegistration
       ? await this.options.controlPlaneRegistration(core)
       : null;
@@ -2748,7 +2792,9 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#evidence.runnerProcessGroupId = null;
     this.#publish();
     this.#pump = setInterval(() => this.#pumpEventsSafely(), 5);
-    if (rotatedAuthority) await this.#waitCommand("run.attach");
+    if (runAttachment) {
+      await this.#waitCommand("run.attach", runAttachment.commandId);
+    }
     await this.#waitForProviderIdentity();
     this.#startupComplete = true;
     this.#diagnostic(
@@ -3452,4 +3498,8 @@ export const runnerdLaunchProfileInternals = Object.freeze({
   acpxProviderPackageAuthority,
   acpxRunnerLaunchProfile,
   resolveBuildOwnedCliArtifact,
+});
+
+export const runnerdRecoveryInternals = Object.freeze({
+  recoveredRunAttachment,
 });
