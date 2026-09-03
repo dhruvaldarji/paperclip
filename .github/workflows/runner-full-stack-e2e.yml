@@ -330,11 +330,11 @@ jobs:
         run: pnpm --filter @paperclipai/paperclip-eval-kernel build
 
       - name: Build local JS-backed provider artifacts
-        if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
+        if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-') || matrix.suiteId == 'openrouter-model-breadth')
         run: pnpm --filter @paperclipai/paperclip-runner build:typescript
 
       - name: Qualify local provider Node interpreter
-        if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
+        if: matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-') || matrix.suiteId == 'openrouter-model-breadth')
         run: |
           node <<'NODE'
           const fs = require("node:fs");

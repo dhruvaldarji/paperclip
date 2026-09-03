@@ -117,6 +117,22 @@ describe("public repository paid workflow security", () => {
     }
   });
 
+  it("prepares every local JS-backed provider before paid execution", async () => {
+    const workflow = await readFile(
+      path.join(repositoryRoot, ".github/workflows/runner-full-stack-e2e.yml"),
+      "utf8",
+    );
+    const jsBackedLocalCondition =
+      "matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-') || matrix.suiteId == 'openrouter-model-breadth')";
+
+    expect(workflow).toContain("Build local JS-backed provider artifacts");
+    expect(workflow).toContain("Qualify local provider Node interpreter");
+    expect(workflow.split(jsBackedLocalCondition)).toHaveLength(3);
+    expect(workflow).toContain(
+      "pnpm --filter @paperclipai/paperclip-runner build:typescript",
+    );
+  });
+
   it("uses environment-scoped OIDC for a no-delete history publisher", async () => {
     const workflow = await readFile(
       path.join(repositoryRoot, ".github/workflows/runner-full-stack-e2e.yml"),
