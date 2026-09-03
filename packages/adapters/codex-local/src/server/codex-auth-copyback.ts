@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, readlink, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readlink, rename, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -276,8 +276,13 @@ async function assertManagedCredentialAncestorsStillLive(
  *      `source`). The open uses `O_EXCL` so it fails instead of following or
  *      overwriting an existing entry, and `O_NOFOLLOW` so it refuses outright
  *      if the temp name is (or became) a symbolic link.
- *   5. Run the newer-wins decision predicate (`source` = sandbox temp,
- *      `destination` = host). Exit 10 → adopt the sandbox copy; exit 20 →
+ *   5. On a non-Linux platform, snapshot the CURRENT host credential bytes
+ *      into a second private temp file, immediately after one more identity
+ *      re-check with no other `await` in between, and hand the predicate
+ *      that frozen snapshot instead of the live host path — see the
+ *      module-level note after this list for why. Then run the newer-wins
+ *      decision predicate (`source` = sandbox temp, `destination` = host, or
+ *      its non-Linux snapshot). Exit 10 → adopt the sandbox copy; exit 20 →
  *      keep the host copy.
  *   6. On exit 10, `rename` the staged temp over the host target, both
  *      addressed through the pinned directory's descriptor alias. `rename`
@@ -286,9 +291,10 @@ async function assertManagedCredentialAncestorsStillLive(
  *      this window is overwritten in place, never written through. This is
  *      an atomic same-directory swap that preserves mode `0600`. On exit 20,
  *      discard the temp file.
- * The staged temp is always removed (rename consumes it on the copy path; the
- * finally cleans it up otherwise), so a failure never leaves a partial file.
- * Never logs token bytes — only the decision outcome.
+ * The staged temp and, on a non-Linux platform, the destination snapshot are
+ * always removed (rename consumes the staged temp on the copy path; the
+ * finally cleans up both otherwise), so a failure never leaves a partial
+ * file. Never logs token bytes — only the decision outcome.
  *
  * The decision predicate (step 5) runs in a separate `node` child process, so
  * it cannot use this process's `/proc/self/fd` alias — `self` inside that
@@ -298,10 +304,28 @@ async function assertManagedCredentialAncestorsStillLive(
  * kernel-maintained record any process with the same user id can read — so
  * the read side resolves through the exact same pinned directory the write
  * side (step 4's create and step 6's `rename`) already uses, and a later swap
- * of the plain directory path text cannot make the two sides disagree. On a
- * non-Linux platform, where `/proc` does not exist, the predicate still reads
- * both files by the plain, re-verified directory path text, matching that
- * platform's write side.
+ * of the plain directory path text cannot make the two sides disagree.
+ *
+ * On a non-Linux platform, where `/proc` does not exist, the predicate's read
+ * of the sandbox temp still uses the plain, re-verified directory path text —
+ * safe, because the temp's name is a value this function only just generated
+ * with a random id, so a local process cannot pre-stage a decoy under that
+ * exact name before this function creates the real one; substituting the
+ * whole directory to defeat that name check breaks the temp lookup outright,
+ * which the predicate treats as an unusable source and fails closed to
+ * "keep destination". The predicate's read of the HOST credential is
+ * different: `hostAuthPath` is a fixed, standing name a local process already
+ * knows, so it cannot rely on an unguessable name the same way. Reading it
+ * live, by plain path text, at whatever moment the predicate's own child
+ * process happens to open it, would let a directory swap-and-restore around
+ * that read compare the predicate against a decoy while the write side, re-
+ * verified right before the `rename`, ends up addressing the genuine,
+ * restored directory — so the decision and the write would silently disagree
+ * about which host credential they each saw. Step 5 above closes this by
+ * reading the host credential itself, in this process, immediately next to
+ * an identity re-check, and handing the predicate a frozen snapshot in place
+ * of the live path — so a later directory swap-and-restore can no longer
+ * change what the predicate reads, on either side.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
   const { readSandboxAuth, hostAuthPath, companyId, log, resolveCacheEntryPath, env } = input;
@@ -490,19 +514,76 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
           fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
           0o600,
         );
+        // On a non-Linux platform, the decision predicate reads its two
+        // arguments inside a separate `node` child process, at whatever
+        // moment THAT process happens to open them — real elapsed time no
+        // identity check in this parent can bracket, because the read never
+        // happens here. A local process could swap `canonicalHostDir` for a
+        // directory holding a decoy host credential, let the predicate read
+        // the decoy, then restore the exact original directory (same device
+        // and inode) before the write-time re-check that follows — a check
+        // that only compares directory identity, so a perfectly restored
+        // original passes it even though the predicate compared against the
+        // decoy. Snapshot the CURRENT host credential bytes into a private,
+        // unguessable temp file right here instead, immediately after a
+        // fresh identity re-check with no other `await` in between, and hand
+        // the predicate that frozen snapshot in place of the live path. A
+        // later swap-and-restore of `canonicalHostDir` can then no longer
+        // change what the predicate reads, because it no longer reads the
+        // live path at all. On Linux this step is unnecessary: the predicate
+        // already reads through the pinned descriptor's own
+        // `/proc/<pid>/fd/<fd>` alias, immune to a directory-level swap the
+        // same way every write already is.
+        let predicateDestinationPath = canonicalHostAuthPath;
+        let destinationSnapshotPath: string | undefined;
         try {
           await handle.writeFile(sandboxAuthBytes);
           await handle.close();
 
+          if (process.platform !== "linux") {
+            await assertPinnedDirectoryStillLive(pinnedDir, canonicalHostDir);
+            destinationSnapshotPath = path.join(
+              writeDirPath,
+              `.auth.json.copyback-dest-${process.pid}-${randomUUID()}.tmp`,
+            );
+            let destinationBytes: Buffer | undefined;
+            try {
+              destinationBytes = await readFile(canonicalHostAuthPath);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+                throw error;
+              }
+              // Genuinely absent: leave `destinationSnapshotPath` unwritten so
+              // the predicate's own read of it also reports absent, matching
+              // the live path's true state without reading the live path a
+              // second time.
+            }
+            if (destinationBytes !== undefined) {
+              const destinationHandle = await open(
+                destinationSnapshotPath,
+                fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+                0o600,
+              );
+              try {
+                await destinationHandle.writeFile(destinationBytes);
+              } finally {
+                await destinationHandle.close();
+              }
+            }
+            predicateDestinationPath = destinationSnapshotPath;
+          }
+
           // The decision predicate runs in a separate `node` child process, so
           // it cannot address `writeDirPath`'s `/proc/self/fd` alias — `self`
-          // would name the CHILD's own descriptor table. `stagedTempPath` and
-          // `canonicalHostAuthPath` instead use `readDirPath`, which on Linux
-          // names this parent process's real pid, so the child reads through
-          // the same pinned descriptor every write above uses. That read only
-          // feeds a comparison; it can skew which side the predicate picks
-          // but never places attacker-controlled bytes anywhere on its own.
-          const decision = await decideCodexAuthMerge(stagedTempPath, canonicalHostAuthPath, {
+          // would name the CHILD's own descriptor table. `stagedTempPath`
+          // instead uses `readDirPath`, which on Linux names this parent
+          // process's real pid, so the child reads through the same pinned
+          // descriptor every write above uses; on a non-Linux platform,
+          // `predicateDestinationPath` is the frozen snapshot above instead
+          // of the live path. That read only feeds a comparison; it can skew
+          // which side the predicate picks but never places attacker-controlled
+          // bytes anywhere on its own.
+          const decision = await decideCodexAuthMerge(stagedTempPath, predicateDestinationPath, {
             errorLabel: "codex auth copy-back",
           });
           if (decision === USE_SOURCE_EXIT) {
@@ -533,6 +614,9 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
           // staged credential bytes.
           await handle.close().catch(() => undefined);
           await rm(writeStagedTempPath, { force: true }).catch(() => undefined);
+          if (destinationSnapshotPath) {
+            await rm(destinationSnapshotPath, { force: true }).catch(() => undefined);
+          }
         }
       } finally {
         await pinnedDir?.close().catch(() => undefined);

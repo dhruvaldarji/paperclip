@@ -1091,6 +1091,105 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
     // The replacement directory is empty — the rename never landed there.
     expect(await readdir(hostDir)).toEqual([]);
   });
+
+  it("does not let a directory swap-and-restore around the predicate read make it compare against a decoy host credential", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-read-race-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "codex-home");
+    const hostDirBackup = path.join(rootDir, "codex-home-backup");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    // The real host credential is genuinely the newest of the two real
+    // copies in this test (host vs. sandbox). It must survive untouched.
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-09T05:00:00Z",
+      marker: "host-real-newest",
+    });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    // Older than the decoy host below, so a predicate that reads the decoy
+    // wrongly concludes the sandbox copy is fresher; older than the real
+    // host too, so the correct decision is always "keep host".
+    const sandboxAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-09T02:00:00Z",
+      marker: "sandbox-middle",
+    });
+    // Older than the sandbox copy above, so a predicate that reads this
+    // instead of the real host concludes the sandbox copy is fresher.
+    const decoyHostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: "2026-07-09T00:00:00Z",
+      marker: "decoy-host-oldest",
+    });
+
+    // Fires right after the directory-pin `open` call resolves (call 1);
+    // re-arms as a no-op for the staging-temp create (call 2); re-arms again
+    // to land the swap right after the destination-snapshot create resolves
+    // (call 3) — the moment right before the predicate spawns, after the fix
+    // has already snapshotted the real host credential. Renames the real
+    // directory aside (preserving its device and inode) and puts a fresh
+    // directory under the original name holding a decoy host credential AND
+    // a decoy source at the exact staged-temp name (standing in for an
+    // attacker who learned the name, for example by watching the directory
+    // before the swap), so a predicate that still read the live path would
+    // read both files from the decoy directory instead of failing closed on
+    // a missing source.
+    let openCallCount = 0;
+    let swapApplied = false;
+    const tempFileNames: string[] = [];
+    onAfterOpenCall = function armNext(args: unknown[]) {
+      openCallCount += 1;
+      if (openCallCount === 2) {
+        tempFileNames.push(path.basename(String(args[0])));
+      }
+      if (openCallCount < 3) {
+        onAfterOpenCall = armNext;
+        return Promise.resolve();
+      }
+      return (async () => {
+        await rename(hostDir, hostDirBackup);
+        await mkdir(hostDir, { recursive: true });
+        await writeFile(path.join(hostDir, "auth.json"), decoyHostAuth, { mode: 0o600 });
+        await writeFile(path.join(hostDir, tempFileNames[0]), sandboxAuth, { mode: 0o600 });
+        swapApplied = true;
+      })();
+    };
+    // Fires right after the predicate resolves, before the write-time
+    // identity re-check. Restores the exact original directory (same
+    // device and inode the pin addresses) under the original name, so that
+    // later re-check passes even though the predicate read the decoy.
+    let restoreApplied = false;
+    onAfterDecideCodexAuthMerge = async () => {
+      await rm(hostDir, { recursive: true, force: true });
+      await rename(hostDirBackup, hostDir);
+      restoreApplied = true;
+    };
+
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      log: () => {},
+    });
+
+    // Guard the guard: if a future change removes the third `open` call (for
+    // example by reverting the destination-snapshot fix), the swap above
+    // would never fire and this test would pass for the wrong reason —
+    // trivially, by never exercising the race at all. Fail loud instead.
+    expect(swapApplied).toBe(true);
+    expect(restoreApplied).toBe(true);
+
+    // The real host credential is genuinely the newest of the two real
+    // copies, so the correct decision is "keep host" and the real file
+    // must survive untouched — never overwritten with the stale sandbox
+    // copy on the strength of a comparison against the decoy.
+    expect(outcome).toBe("kept-host");
+    expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+    expect(await readdir(hostDir)).toEqual(["auth.json"]);
+  });
 });
 
 // `O_NOFOLLOW` on the directory-pin `open` call only refuses a symbolic link
