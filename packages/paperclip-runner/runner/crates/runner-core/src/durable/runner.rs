@@ -280,6 +280,14 @@ pub fn run_durable_runner<E: CommandExecutor>(
             }
             lifecycle_after_reply = lifecycle_after_reply.merge(lifecycle);
             if let Err(error) = transport.send_json(&command_result_envelope(&state, &result)) {
+                if lifecycle.durable_state().is_some() {
+                    return stop_after_terminal_result_delivery_failure(
+                        &mut state,
+                        &store,
+                        &mut executor,
+                        error,
+                    );
+                }
                 state.record_diagnostic(error.to_string());
                 disconnected = true;
                 break;
@@ -397,6 +405,14 @@ pub fn run_durable_runner<E: CommandExecutor>(
                     if let Err(error) =
                         transport.send_json(&command_result_envelope(&state, &result))
                     {
+                        if lifecycle.durable_state().is_some() {
+                            return stop_after_terminal_result_delivery_failure(
+                                &mut state,
+                                &store,
+                                &mut executor,
+                                error,
+                            );
+                        }
                         disconnected_since.get_or_insert_with(Instant::now);
                         state.record_diagnostic(error.to_string());
                         state.reconnect_count = state.reconnect_count.saturating_add(1);
@@ -497,6 +513,23 @@ fn persist_lifecycle_before_command_delivery(
     // has already observed its terminal command result.
     state.lifecycle = lifecycle.to_owned();
     store.save(state)
+}
+
+fn stop_after_terminal_result_delivery_failure<E: CommandExecutor>(
+    state: &mut DurableState,
+    store: &DurableStateStore,
+    executor: &mut E,
+    error: DurableRunnerError,
+) -> Result<(), DurableRunnerError> {
+    // The terminal transition was committed before the attempted delivery.
+    // Its result may or may not have reached the controller, but reconnecting
+    // this process would overwrite that durable state as ready and admit work
+    // after shutdown/suspend. Leave the result journaled for reconciliation by
+    // a future authorized process instead.
+    state.record_diagnostic(error.to_string());
+    store.save(state)?;
+    let _ = executor.shutdown();
+    Err(error)
 }
 
 fn poll_executor_events<E: CommandExecutor>(
@@ -663,6 +696,10 @@ mod tests {
 
     struct ShutdownFailingExecutor;
 
+    struct ShutdownCountingExecutor {
+        shutdown_calls: usize,
+    }
+
     struct RetainingEventExecutor {
         events: VecDeque<PolledEvent>,
         fail_acknowledgement: bool,
@@ -693,6 +730,17 @@ mod tests {
             Err(DurableRunnerError::invalid(
                 "simulated terminal cleanup failure",
             ))
+        }
+    }
+
+    impl CommandExecutor for ShutdownCountingExecutor {
+        fn execute(&mut self, _command: &Command) -> Result<CommandExecution, DurableRunnerError> {
+            Ok(CommandExecution::result(json!({"status": "completed"})))
+        }
+
+        fn shutdown(&mut self) -> Result<(), DurableRunnerError> {
+            self.shutdown_calls += 1;
+            Ok(())
         }
     }
 
@@ -777,6 +825,40 @@ mod tests {
         assert!(error.to_string().contains("terminal cleanup failure"));
         assert!(existed);
         assert_eq!(recovered.lifecycle, "stopped");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn terminal_result_delivery_failure_stops_without_reopening_lifecycle() {
+        let directory = std::env::temp_dir().join(format!(
+            "paperclip-runner-terminal-result-delivery-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let config = config(directory.clone());
+        let store = DurableStateStore::new(&directory).unwrap();
+        let (mut state, _) = store.load_or_create(&config).unwrap();
+        state.lifecycle = "stopped".to_owned();
+        store.save(&state).unwrap();
+        let mut executor = ShutdownCountingExecutor { shutdown_calls: 0 };
+
+        let error = stop_after_terminal_result_delivery_failure(
+            &mut state,
+            &store,
+            &mut executor,
+            DurableRunnerError::invalid("simulated result delivery failure"),
+        )
+        .expect_err("terminal result delivery failure remains observable");
+        let (recovered, existed) = store.load_or_create(&config).unwrap();
+
+        assert!(error.to_string().contains("result delivery failure"));
+        assert!(existed);
+        assert_eq!(recovered.lifecycle, "stopped");
+        assert_eq!(executor.shutdown_calls, 1);
+        assert!(recovered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("result delivery failure")));
         fs::remove_dir_all(directory).unwrap();
     }
 
