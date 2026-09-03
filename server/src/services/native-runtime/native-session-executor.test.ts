@@ -4618,10 +4618,52 @@ describe("runnerd provider runtime wiring", () => {
     backendOptions.codexTransportFactory!();
     expect(state.createTransport).toHaveBeenCalledWith(
       expect.objectContaining({
+        runnerBinary: "/tmp/paperclip-runnerd",
         environment: expect.objectContaining({
           PAPERCLIP_WORKSPACE_CWD: remoteCwd,
         }),
       }),
+    );
+    expect(state.createTransport.mock.calls[0]![0].runnerBinary).not.toBe(
+      `${remoteCwd}/.paperclip-runtime/paperclip-runner/bin/paperclip-runnerd`,
+    );
+  });
+
+  it("binds a remote launch to the configured controller-owned runner artifact", async () => {
+    const remoteCwd = "/home/daytona/paperclip-workspace";
+    const controllerArtifact = "/controller/artifacts/paperclip-runnerd";
+    const remoteExecution = {
+      ...execution,
+      binding: { ...execution.binding, runId: "run-remote-runner-artifact" },
+      workspace: { ...execution.workspace, cwd: "/host/paperclip-workspace" },
+    } as NativeExecutionInputV1;
+
+    await createRunnerdBackend({
+      db: leaseDb(remoteExecution),
+      execution: remoteExecution,
+      runnerInstanceId: "runner",
+      runnerExecutionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd,
+        spec: {
+          host: "runner.internal",
+          port: 22,
+          username: "runner",
+          remoteWorkspacePath: remoteCwd,
+          remoteCwd,
+          privateKey: null,
+          knownHosts: null,
+          strictHostKeyChecking: true,
+        },
+      },
+      runnerRemoteBinaryPath: controllerArtifact,
+    });
+
+    state.createTransport.mockClear();
+    state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+    expect(state.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ runnerBinary: controllerArtifact }),
     );
   });
 

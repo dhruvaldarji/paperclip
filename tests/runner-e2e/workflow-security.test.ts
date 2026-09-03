@@ -376,6 +376,9 @@ describe("public repository paid workflow security", () => {
     expect(testJob).toContain(
       "test -x packages/paperclip-runner/runner/target/debug/paperclip-runnerd",
     );
+    expect(testJob).toContain(
+      "PAPERCLIP_RUNNER_REMOTE_BINARY_PATH: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/paperclip-runnerd",
+    );
     expect(testJob).toContain(".payload.runnerSourceRevision == $revision");
     expect(workflow).toContain("Qualify local provider Node interpreter");
     expect(testJob).toContain(

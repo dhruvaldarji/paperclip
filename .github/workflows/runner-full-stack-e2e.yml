@@ -890,6 +890,9 @@ jobs:
           OPENROUTER_API_KEY: ${{ matrix.credentialName == 'OPENROUTER_API_KEY' && secrets.OPENROUTER_API_KEY || '' }}
           DAYTONA_API_KEY: ${{ matrix.environmentId == 'daytona' && secrets.DAYTONA_API_KEY || '' }}
           PAPERCLIP_E2E_DAYTONA_IMAGE: ${{ needs.daytona_image.outputs.image }}
+          # Bind PRP identity to the exact build-once bytes that the server
+          # stages into Daytona instead of a separately built image binary.
+          PAPERCLIP_RUNNER_REMOTE_BINARY_PATH: ${{ github.workspace }}/packages/paperclip-runner/runner/target/debug/paperclip-runnerd
           PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH: ${{ github.workspace }}/packages/paperclip-runner/provider-pack
           PAPERCLIP_E2E_CAMPAIGN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.executionId }}
         run: pnpm test:e2e:runner -- --id "${{ matrix.executionId }}"
