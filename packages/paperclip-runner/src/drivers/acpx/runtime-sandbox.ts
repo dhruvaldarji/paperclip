@@ -41,29 +41,58 @@ const MAX_SANDBOX_ENVIRONMENT_BYTES = 512 * 1024;
 const MAX_WORKSPACE_RECORD_BYTES = 64 * 1024;
 
 interface AcpxRuntimeSandboxRootOwner {
-  readonly token: symbol;
+  readonly root: string;
+  readonly markerPath: string;
+  readonly identifier: string;
   readonly dev: bigint;
   readonly ino: bigint;
 }
 
-// The runtime root path is deterministic per normalized session id, so a
-// path-only delete cannot prove a root still belongs to the admission that
-// created it. Each successful claim registers the current owner here,
-// keyed by root path. A later claim for the same path (a legitimate
-// re-opened session) replaces the entry. Cleanup for a stale owner checks
-// this registry and the captured directory identity before it deletes
-// anything, so a superseded owner's cleanup leaves a live root alone.
+// The runtime root path is deterministic per normalized session id, and
+// `ensurePrivateDirectory` reuses an existing directory, so a path-only
+// delete cannot prove a root still belongs to the admission that created it.
+// An in-process registry cannot prove this either: a second Runner process
+// starts with an empty registry, so its first claim always looks unowned.
+// Only the filesystem is shared between Runner processes, so ownership is
+// proved by a marker file placed beside the root (never inside it, because
+// the recursive delete would destroy an inside marker before cleanup could
+// read it). A claim opens the marker with O_CREAT|O_EXCL and writes a
+// per-claim random identifier; that open is the cross-process exclusivity
+// primitive. A later admission for the same deterministic root sees EEXIST
+// and continues without delete authority — it never overwrites the marker,
+// never deletes the root, and never fails the admission, because two
+// admissions may legitimately share one session root. This in-process map
+// is a same-process convenience mirror of a successful claim; the marker
+// file is the sole source of truth for delete authority.
 const acpxRuntimeSandboxRootOwners = new Map<
   string,
   AcpxRuntimeSandboxRootOwner
 >();
 
+// A declined claim may still finish building a working, live sandbox on the
+// shared root (rule: two admissions may legitimately share one session
+// root). This process-local set records that a declined admission is
+// currently using a root, so the marker owner's own later cleanup can see
+// it is not the sole user and must leave the root alone, even though the
+// marker itself never changed hands. Only a declined admission is ever
+// added; the claimed owner is proved solely through the marker. An entry is
+// removed when that exact admission's own cleanup or close runs, whichever
+// comes first.
+const acpxRuntimeSandboxRootSharedOccupants = new Map<
+  string,
+  Set<AcpxRuntimeSandboxRootOwner>
+>();
+
 // Associates each returned sandbox object with the exact owner it was built
-// under, without exposing the ownership token on the public sandbox shape.
+// under, without exposing the ownership identifier on the public sandbox
+// shape.
 const acpxRuntimeSandboxRootOwnerByResult = new WeakMap<
   AcpxRuntimeSandbox,
-  AcpxRuntimeSandboxRootOwner & { readonly root: string }
+  AcpxRuntimeSandboxRootOwner
 >();
+
+const ACPX_SANDBOX_ROOT_MARKER_SUFFIX = ".owner";
+const ACPX_SANDBOX_ROOT_MARKER_MAX_BYTES = 128;
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -376,11 +405,12 @@ export async function prepareAcpxRuntimeSandbox(
     expectedRoot,
     physicalAcpxDirectory,
   );
-  // Claim ownership as soon as the root exists, before any slower step (a
-  // credential write, a later directory sync) can run. A later admission for
-  // the same deterministic path claims this same record and supersedes it;
-  // an aborted admission's own late cleanup then finds it is no longer the
-  // registered owner and leaves the live root alone.
+  // Claim the marker as soon as the root exists, before any slower step (a
+  // credential write, a later directory sync) can run. When another
+  // admission already owns this deterministic root, the claim is declined:
+  // this admission continues without delete authority, and its own cleanup
+  // later finds the marker does not carry its identifier and leaves the
+  // live root alone.
   const owner = await claimAcpxRuntimeSandboxRoot(root);
   try {
     await dependencies.afterRootOwned?.();
@@ -485,7 +515,8 @@ export async function prepareAcpxRuntimeSandbox(
       launchEnvironment: Object.freeze({ ...launchEnvironment }),
       persistedEnvironment: Object.freeze(persistedEnvironment),
     };
-    acpxRuntimeSandboxRootOwnerByResult.set(sandbox, { ...owner, root });
+    registerAcpxSandboxRootSharedOccupantIfDeclined(root, owner);
+    acpxRuntimeSandboxRootOwnerByResult.set(sandbox, owner);
     return sandbox;
   } catch (error) {
     let cleanupError: unknown = null;
@@ -504,6 +535,126 @@ export async function prepareAcpxRuntimeSandbox(
   }
 }
 
+function acpxRuntimeSandboxRootMarkerPath(root: string): string {
+  return join(
+    dirname(root),
+    `${basename(root)}${ACPX_SANDBOX_ROOT_MARKER_SUFFIX}`,
+  );
+}
+
+/**
+ * Open the marker file with O_CREAT|O_EXCL. Only one caller, in one process,
+ * can ever win this open call for a given marker path — that is the
+ * cross-process exclusivity primitive the claim relies on. Returns false on
+ * EEXIST instead of throwing, since losing the race is an expected outcome.
+ */
+async function writeAcpxSandboxRootMarkerExclusive(
+  markerPath: string,
+  identifier: string,
+): Promise<boolean> {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      markerPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      PRIVATE_FILE_MODE,
+    );
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    await handle.chmod(PRIVATE_FILE_MODE);
+    await handle.writeFile(identifier, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(dirname(markerPath));
+  return true;
+}
+
+// Read a marker's identifier. Returns null for a missing or malformed
+// marker, so the caller treats it as "not proven" instead of as an error.
+async function readAcpxSandboxRootMarkerIdentifier(
+  markerPath: string,
+): Promise<string | null> {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      markerPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch (error) {
+    if (errorCode(error) === "ENOENT" || errorCode(error) === "ELOOP") {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const metadata = await handle.stat();
+    if (
+      !metadata.isFile() ||
+      metadata.size < 1 ||
+      metadata.size > ACPX_SANDBOX_ROOT_MARKER_MAX_BYTES
+    ) {
+      return null;
+    }
+    const bytes = await readFile(handle);
+    return bytes.toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+// Records a declined claim as a shared occupant of the root, so the marker
+// owner's own later cleanup can see it is not the root's sole user. A no-op
+// for a claimed owner, since only a declined claim is ever recorded.
+function registerAcpxSandboxRootSharedOccupantIfDeclined(
+  root: string,
+  owner: AcpxRuntimeSandboxRootOwner,
+): void {
+  if (acpxRuntimeSandboxRootOwners.get(root) === owner) return;
+  let occupants = acpxRuntimeSandboxRootSharedOccupants.get(root);
+  if (!occupants) {
+    occupants = new Set();
+    acpxRuntimeSandboxRootSharedOccupants.set(root, occupants);
+  }
+  occupants.add(owner);
+}
+
+// Ends this admission's own shared-occupant record, if it has one. Call
+// this from every path where an admission's own use of a root ends.
+function releaseAcpxSandboxRootSharedOccupant(
+  root: string,
+  owner: AcpxRuntimeSandboxRootOwner,
+): void {
+  const occupants = acpxRuntimeSandboxRootSharedOccupants.get(root);
+  if (!occupants) return;
+  occupants.delete(owner);
+  if (occupants.size === 0) acpxRuntimeSandboxRootSharedOccupants.delete(root);
+}
+
+function hasAcpxSandboxRootSharedOccupants(root: string): boolean {
+  return (acpxRuntimeSandboxRootSharedOccupants.get(root)?.size ?? 0) > 0;
+}
+
+function reportDeclinedAcpxSandboxRootClaim(root: string): void {
+  process.emitWarning(
+    JSON.stringify({
+      schema: "paperclip.runner.acpx_sandbox_root_claim_declined.v1",
+      root,
+    }),
+    {
+      code: "PAPERCLIP_ACPX_SANDBOX_ROOT_CLAIM_DECLINED",
+      type: "PaperclipRunnerSandboxWarning",
+    },
+  );
+}
+
 async function claimAcpxRuntimeSandboxRoot(
   root: string,
 ): Promise<AcpxRuntimeSandboxRootOwner> {
@@ -511,23 +662,57 @@ async function claimAcpxRuntimeSandboxRoot(
   if (entry.isSymbolicLink() || !entry.isDirectory()) {
     throw new Error("ACPX sandbox root must be a real directory");
   }
+  const markerPath = acpxRuntimeSandboxRootMarkerPath(root);
+  const identifier = randomBytes(16).toString("hex");
   const owner: AcpxRuntimeSandboxRootOwner = {
-    token: Symbol("acpx-sandbox-root-owner"),
+    root,
+    markerPath,
+    identifier,
     dev: entry.dev,
     ino: entry.ino,
   };
+  const claimed = await writeAcpxSandboxRootMarkerExclusive(
+    markerPath,
+    identifier,
+  );
+  if (!claimed) {
+    // Another admission already owns this deterministic root. Continue
+    // without delete authority: never overwrite its marker, never touch the
+    // in-process registry, never delete the root, and never fail this
+    // admission — two admissions may legitimately share one session root.
+    reportDeclinedAcpxSandboxRootClaim(root);
+    return owner;
+  }
   acpxRuntimeSandboxRootOwners.set(root, owner);
   return owner;
 }
 
+/**
+ * Delete a sandbox root through the exact ownership capability that created
+ * it. Proves ownership by reading the marker file back and comparing its
+ * identifier, so the proof holds across two Runner processes, then
+ * revalidates the root's directory identity. A missing marker, a mismatched
+ * identifier, a changed identity, or another admission still sharing the
+ * root means: delete nothing.
+ */
 async function revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
   root: string,
   owner: AcpxRuntimeSandboxRootOwner,
 ): Promise<void> {
-  const current = acpxRuntimeSandboxRootOwners.get(root);
-  if (current === undefined || current.token !== owner.token) {
-    // A later admission has since claimed this deterministic root. It is
-    // live; a superseded owner must never delete it.
+  // This admission's own use of the root ends here, whether or not it goes
+  // on to hold delete authority.
+  releaseAcpxSandboxRootSharedOccupant(root, owner);
+
+  const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
+    owner.markerPath,
+  );
+  if (storedIdentifier !== owner.identifier) {
+    // A missing marker or a different identifier means another admission
+    // owns (or once owned) this root, or this admission's own claim was
+    // declined. Either way, delete nothing.
+    if (acpxRuntimeSandboxRootOwners.get(root) === owner) {
+      acpxRuntimeSandboxRootOwners.delete(root);
+    }
     return;
   }
   let entry: BigIntStats;
@@ -548,17 +733,27 @@ async function revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
   ) {
     throw new Error("ACPX sandbox root identity changed before cleanup");
   }
+  if (hasAcpxSandboxRootSharedOccupants(root)) {
+    // A declined admission built a live sandbox on this same root and has
+    // not yet finished using it. Leave the root, the marker, and the
+    // registry entry alone: the failure mode is a retained directory, never
+    // a deleted live one.
+    return;
+  }
   await rm(root, { recursive: true });
-  if (acpxRuntimeSandboxRootOwners.get(root) === current) {
+  await unlink(owner.markerPath).catch((error) => {
+    if (errorCode(error) !== "ENOENT") throw error;
+  });
+  if (acpxRuntimeSandboxRootOwners.get(root) === owner) {
     acpxRuntimeSandboxRootOwners.delete(root);
   }
 }
 
 /**
  * Remove a sandbox root through the exact ownership capability that created
- * it. Revalidates the root's directory identity and refuses the delete when
- * a later admission has since claimed the same deterministic path or the
- * identity no longer matches.
+ * it. Refuses the delete when this admission never proved ownership of the
+ * marker, or a later admission has since claimed the same deterministic
+ * path, or the identity no longer matches.
  */
 export async function removeOwnedAcpxRuntimeSandboxRoot(
   sandbox: AcpxRuntimeSandbox,
@@ -568,6 +763,38 @@ export async function removeOwnedAcpxRuntimeSandboxRoot(
     throw new Error("ACPX sandbox root ownership capability is unavailable");
   }
   await revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(owner.root, owner);
+}
+
+/**
+ * Release the delete-authority claim on a sandbox root without removing the
+ * root itself. Call this when an admission that reached a live host ends,
+ * so a later admission for the same deterministic session root can claim
+ * the marker and, if it later aborts, clean up its own attempt. Without
+ * this release, the marker would keep the previous admission's identifier
+ * for the process lifetime and every later admission's own abort cleanup
+ * would find a marker it can never match.
+ */
+export async function releaseAcpxRuntimeSandboxRootClaim(
+  sandbox: AcpxRuntimeSandbox,
+): Promise<void> {
+  const owner = acpxRuntimeSandboxRootOwnerByResult.get(sandbox);
+  if (!owner) {
+    throw new Error("ACPX sandbox root ownership capability is unavailable");
+  }
+  // This admission's own use of the root ends here.
+  releaseAcpxSandboxRootSharedOccupant(owner.root, owner);
+
+  const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
+    owner.markerPath,
+  );
+  if (storedIdentifier === owner.identifier) {
+    await unlink(owner.markerPath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+  }
+  if (acpxRuntimeSandboxRootOwners.get(owner.root) === owner) {
+    acpxRuntimeSandboxRootOwners.delete(owner.root);
+  }
 }
 
 async function ensurePrivateDirectory(

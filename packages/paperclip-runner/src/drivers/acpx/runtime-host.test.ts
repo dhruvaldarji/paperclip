@@ -1331,6 +1331,70 @@ describe("ACPX runtime host", () => {
     await secondHost.close({ reason: "test complete" });
   });
 
+  it("lets a later admission claim and clean up its own abort once the owning admission closes", async () => {
+    const fixture = await hostFixture();
+    const firstRuntime = runtimePort();
+    const firstHost = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "deny-all",
+        environment: {
+          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"first"}',
+        },
+      },
+      fixture.dependencies({ openRuntime: async () => firstRuntime }),
+    );
+    const root = firstHost.runtimeRoot();
+
+    // Closing the first admission releases its exclusive claim on the root
+    // without deleting it, so a later admission for the same session can
+    // claim the root outright instead of being declined.
+    await firstHost.close({ reason: "first admission complete" });
+
+    const rootGate = deferred<void>();
+    const prepareSandbox: NonNullable<
+      AcpxRuntimeHostDependencies["prepareSandbox"]
+    > = vi.fn((input) =>
+      prepareAcpxRuntimeSandbox(input, {
+        afterRootOwned: () => rootGate.promise,
+      }),
+    );
+    const openRuntime = vi.fn(async () => runtimePort());
+    const controller = new AbortController();
+    const cancellation = new Error("second admission cancelled");
+
+    const opening = AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "deny-all",
+        environment: {
+          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"second"}',
+        },
+        signal: controller.signal,
+      },
+      {
+        ...fixture.dependencies({ openRuntime }),
+        prepareSandbox,
+      },
+    );
+    await waitForAcpxAdmission(() =>
+      expect(prepareSandbox).toHaveBeenCalledOnce(),
+    );
+
+    controller.abort(cancellation);
+    await expect(opening).rejects.toBe(cancellation);
+    expect(openRuntime).not.toHaveBeenCalled();
+
+    rootGate.resolve();
+    await waitForAcpxAdmission(() =>
+      expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" }),
+    );
+  });
+
   it("removes a codex credential staged after an aborted admission's sandbox preparation resolves", async () => {
     const fixture = await hostFixture();
     const rootGate = deferred<void>();

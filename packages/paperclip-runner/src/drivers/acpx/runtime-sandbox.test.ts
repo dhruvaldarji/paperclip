@@ -14,13 +14,14 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import { createAcpxRecoveryBinding } from "./recovery-identity.js";
 import {
   prepareAcpxRuntimeSandbox,
   readAcpxRecoveryWorkspace,
+  removeOwnedAcpxRuntimeSandboxRoot,
 } from "./runtime-sandbox.js";
 
 const temporaryDirectories: string[] = [];
@@ -299,6 +300,63 @@ describe("ACPX runtime sandbox", () => {
       await recoveryWorkspace.close();
     },
   );
+
+  it("keeps a live admission's root and credential when a second, declined admission aborts", async () => {
+    const fixture = await sandboxFixture("codex");
+    const first = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    const credentialPath = join(first.agentHomeDirectory, "auth.json");
+    await writeFile(credentialPath, '{"owner":"first"}\n');
+
+    // The second admission resolves to the same deterministic root. Its own
+    // claim is declined, since the first admission already owns the root's
+    // exclusive marker, so it must never gain delete authority over it.
+    const second = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(second.root).toBe(first.root);
+
+    await removeOwnedAcpxRuntimeSandboxRoot(second);
+
+    await expect(readFile(credentialPath, "utf8")).resolves.toContain(
+      "first",
+    );
+    await expect(stat(first.root)).resolves.toBeDefined();
+  });
+
+  it("keeps a live admission's root when a same-root claim declined in a fresh process registry aborts", async () => {
+    const fixture = await sandboxFixture("codex");
+    const first = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    const credentialPath = join(first.agentHomeDirectory, "auth.json");
+    await writeFile(credentialPath, '{"owner":"first"}\n');
+
+    // A second Runner process starts with an empty in-process registry.
+    // Simulate that by loading a fresh module instance instead of reusing
+    // this file's, so the only state the second admission can observe is
+    // whatever is on disk.
+    vi.resetModules();
+    const secondProcess: typeof import("./runtime-sandbox.js") = await import(
+      "./runtime-sandbox.js"
+    );
+    const second = await secondProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(second.root).toBe(first.root);
+
+    await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(second);
+
+    await expect(readFile(credentialPath, "utf8")).resolves.toContain(
+      "first",
+    );
+    await expect(stat(first.root)).resolves.toBeDefined();
+  });
 });
 
 async function sandboxFixture(agent: "pi" | "claude" | "codex") {

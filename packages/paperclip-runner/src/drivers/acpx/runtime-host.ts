@@ -39,6 +39,7 @@ import {
 } from "./recovery-identity.js";
 import {
   prepareAcpxRuntimeSandbox,
+  releaseAcpxRuntimeSandboxRootClaim,
   removeOwnedAcpxRuntimeSandboxRoot,
   type AcpxRuntimeSandbox,
 } from "./runtime-sandbox.js";
@@ -625,6 +626,15 @@ export class AcpxRuntimeHost {
       reason,
     );
     if (cleanupError) errors.push(...cleanupError.errors);
+    try {
+      // This admission reached a live host, so the sandbox root stays on
+      // disk for reuse. Release only the delete-authority claim, so a later
+      // admission for the same session can claim it and clean up its own
+      // aborted attempt.
+      await releaseAcpxRuntimeSandboxRootClaim(this.#sandbox);
+    } catch (error) {
+      errors.push(error);
+    }
     if (!cleanupError) {
       // Runtime, credential, and command ownership has been relinquished even
       // when the provider never acknowledged turn cancellation. Preserve that
