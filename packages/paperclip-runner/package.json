@@ -158,13 +158,13 @@
     "acpx": "0.13.1",
     "ajv": "^8.20.0",
     "json-schema-to-ts": "^3.1.1",
-    "node": "24.11.0",
     "opencode-ai": "1.18.17",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },
   "optionalDependencies": {
-    "@openai/codex-linux-x64": "npm:@openai/codex@0.148.0-linux-x64"
+    "@openai/codex-linux-x64": "npm:@openai/codex@0.148.0-linux-x64",
+    "node-linux-x64": "24.11.0"
   },
   "peerDependencies": {
     "react": ">=18",

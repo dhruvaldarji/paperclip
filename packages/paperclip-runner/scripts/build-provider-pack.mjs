@@ -24,16 +24,14 @@ const outputRoot = resolve(
   outputArgument ?? join(packageRoot, "provider-pack"),
 );
 if (
-  outputRoot === workspaceRoot
-  || outputRoot === packageRoot
-  || outputRoot === "/"
+  outputRoot === workspaceRoot ||
+  outputRoot === packageRoot ||
+  outputRoot === "/"
 ) {
   throw new Error(`Refusing unsafe provider-pack output path: ${outputRoot}`);
 }
 
-const temporaryParent = mkdtempSync(
-  join(tmpdir(), "paperclip-provider-pack-"),
-);
+const temporaryParent = mkdtempSync(join(tmpdir(), "paperclip-provider-pack-"));
 const temporaryRoot = join(temporaryParent, "pack");
 
 function canonicalJson(value) {
@@ -56,8 +54,9 @@ function sha256File(path) {
 function sha256Tree(root) {
   const hash = createHash("sha256");
   const visit = (directory, prefix = "") => {
-    const entries = readdirSync(directory, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name));
+    const entries = readdirSync(directory, { withFileTypes: true }).sort(
+      (left, right) => left.name.localeCompare(right.name),
+    );
     for (const entry of entries) {
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolutePath = join(directory, entry.name);
@@ -67,9 +66,13 @@ function sha256Tree(root) {
       } else if (entry.isFile()) {
         hash.update(`file\0${relativePath}\0${sha256File(absolutePath)}\n`);
       } else if (entry.isSymbolicLink()) {
-        hash.update(`symlink\0${relativePath}\0${readlinkSync(absolutePath)}\n`);
+        hash.update(
+          `symlink\0${relativePath}\0${readlinkSync(absolutePath)}\n`,
+        );
       } else {
-        throw new Error(`Provider pack tree contains unsupported entry ${relativePath}`);
+        throw new Error(
+          `Provider pack tree contains unsupported entry ${relativePath}`,
+        );
       }
     }
   };
@@ -122,6 +125,22 @@ try {
   if (deployed.status !== 0) {
     throw new Error(`pnpm deploy failed with exit code ${deployed.status}`);
   }
+
+  // The generic `node` npm package runs an install-time downloader. Depend on
+  // the immutable Linux x64 artifact directly, then expose it at the stable
+  // pack-owned path consumed by the verified launch contract.
+  const packagedNodeRoot = join(
+    temporaryRoot,
+    "node_modules",
+    "node-linux-x64",
+  );
+  const stableNodeRoot = join(temporaryRoot, "node_modules", "node");
+  if (!existsSync(packagedNodeRoot) || existsSync(stableNodeRoot)) {
+    throw new Error(
+      "Provider pack requires the pinned node-linux-x64 artifact and an unclaimed stable Node path",
+    );
+  }
+  renameSync(packagedNodeRoot, stableNodeRoot);
 
   // pnpm's generated .bin shims embed the temporary deployment directory in
   // NODE_PATH. That makes an otherwise identical provider pack hash differ on
@@ -193,7 +212,10 @@ try {
   const opencodeExecutable = "node_modules/opencode-ai/bin/opencode.exe";
   const nodeCommand = "node_modules/node/bin/node";
   const productionLock = "pnpm-lock.yaml";
-  copyFileSync(join(workspaceRoot, "pnpm-lock.yaml"), join(temporaryRoot, productionLock));
+  copyFileSync(
+    join(workspaceRoot, "pnpm-lock.yaml"),
+    join(temporaryRoot, productionLock),
+  );
   for (const relativePath of [
     nodeCommand,
     productionLock,
@@ -207,16 +229,14 @@ try {
     }
   }
 
-  const opencodeProxySha = sha256File(
-    join(temporaryRoot, opencodeProxyPath),
-  );
+  const opencodeProxySha = sha256File(join(temporaryRoot, opencodeProxyPath));
   const acpxSidecarSha = sha256File(join(temporaryRoot, acpxSidecarPath));
   const distDigest = sha256Tree(join(temporaryRoot, "dist"));
   const configuredRevision =
     process.env.PAPERCLIP_RUNNER_SOURCE_REVISION?.trim();
   const revision =
-    configuredRevision
-    ?? execFileSync("git", ["rev-parse", "HEAD"], {
+    configuredRevision ??
+    execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: workspaceRoot,
       encoding: "utf8",
     }).trim();
@@ -225,11 +245,9 @@ try {
   }
   const dirty = configuredRevision
     ? false
-    : spawnSync(
-        "git",
-        ["diff", "--quiet", "--", "packages/paperclip-runner"],
-        { cwd: workspaceRoot },
-      ).status !== 0;
+    : spawnSync("git", ["diff", "--quiet", "--", "packages/paperclip-runner"], {
+        cwd: workspaceRoot,
+      }).status !== 0;
   const payload = {
     pins: {
       nodeMinimum: "24.11.0",
