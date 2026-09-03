@@ -277,14 +277,13 @@ impl AcpxSidecarTransport {
                         ));
                     }
                     let error = response.error.expect("failed response has validated error");
-                    return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(
-                        format!(
-                            "ACPX sidecar command {} was rejected (retryable={}, classification={})",
-                            command.as_str(),
-                            error.retryable,
-                            response_error_classification(&error),
-                        ),
-                    )));
+                    return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(format!(
+                        "ACPX sidecar command {} was rejected (retryable={}, classification={}){}",
+                        command.as_str(),
+                        error.retryable,
+                        response_error_classification(&error),
+                        self.diagnostic_suffix(),
+                    ))));
                 }
             }
         }
@@ -591,7 +590,13 @@ fn nullable_identifier(
 }
 
 fn redact_diagnostic(value: &str) -> String {
-    if value.is_empty() {
+    if value.starts_with("[paperclip-acpx-launch] ")
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "[]-_ ".contains(character))
+    {
+        value.to_owned()
+    } else if value.is_empty() {
         String::new()
     } else {
         "[REDACTED]".to_owned()
