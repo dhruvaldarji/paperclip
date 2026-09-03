@@ -83,6 +83,17 @@ describe("ACPX runtime sandbox", () => {
         sandbox.persistedEnvironment.PAPERCLIP_NATIVE_MCP_TOKEN,
       ).toBeUndefined();
       expect(sandbox.persistedEnvironment.HOME).toBe(sandbox.homeDirectory);
+      if (agent === "codex") {
+        const config = await readFile(
+          join(sandbox.agentHomeDirectory, "config.toml"),
+          "utf8",
+        );
+        expect(config).toContain("shell_snapshot = false");
+        expect(config).toContain(
+          'exclude = ["OPENAI_API_KEY", "CODEX_API_KEY"]',
+        );
+        expect(config).not.toContain("provider-secret");
+      }
       expect(await readFile(sandbox.workspaceRecordPath, "utf8")).toBe(
         `${fixture.binding.workspacePath}\n`,
       );
