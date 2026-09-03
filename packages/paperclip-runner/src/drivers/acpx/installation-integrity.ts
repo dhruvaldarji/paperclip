@@ -121,7 +121,6 @@ try {
 export const PROVIDER_LIFETIME_GUARDIAN_SOURCE = `
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
-const diagnose = (stage) => { try { fs.writeSync(2, "[paperclip-acpx-launch] " + stage + "\\n"); } catch {} };
 const WATCHDOG_SOURCE = ${JSON.stringify(PROVIDER_LIFETIME_WATCHDOG_SOURCE)};
 const runtimeExecutable = process.env.${VERIFIED_RUNTIME_EXECUTABLE_ENV} || process.execPath;
 const dependencyAncestorCount = Number.parseInt(process.argv[4], 10);
@@ -134,7 +133,6 @@ const OWNERSHIP_FD = OWNER_FD + 1;
 const PROVIDER_EXIT_FD = OWNERSHIP_FD + 1;
 const CREDENTIAL_FENCE_FD_START = PROVIDER_EXIT_FD + 1;
 const dependencyAncestorFds = Array.from({ length: dependencyAncestorCount }, (_, index) => ${DEPENDENCY_ANCESTOR_FD_START} + index);
-diagnose("guardian_started");
 let provider;
 let watchdog;
 let reaped = false;
@@ -170,7 +168,6 @@ process.on("SIGHUP", shutdown);
 const startProvider = () => {
   if (provider || reaped || shutdownStarted) return;
   try {
-    diagnose("provider_spawn_requested");
     provider = spawn(
       runtimeExecutable,
       ["--eval", process.argv[1], ...process.argv.slice(2)],
@@ -186,11 +183,10 @@ const startProvider = () => {
         windowsHide: true,
       },
     );
-    provider.once("error", () => { diagnose("provider_error"); reap(); });
-    provider.once("exit", () => { diagnose("provider_exit"); reap(); });
+    provider.once("error", reap);
+    provider.once("exit", reap);
     provider.once("spawn", () => {
       try {
-        diagnose("provider_spawned");
         if (reaped || shutdownStarted) {
           reap();
           return;
@@ -221,7 +217,6 @@ try {
     stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
     windowsHide: true,
   });
-  diagnose("watchdog_spawned");
   const watchdogOwnerPipe = watchdog.stdio[3];
   const watchdogReady = watchdog.stdio[4];
   if (watchdogOwnerPipe == null) throw new Error("ACPX provider lifetime watchdog omitted its owner pipe");
@@ -246,7 +241,6 @@ try {
     }
     if (!watchdogOutput.includes("armed\\n")) return;
     watchdogArmed = true;
-    diagnose("watchdog_armed");
     clearTimeout(watchdogReadyTimeout);
     watchdogReady.removeAllListeners("data");
     startProvider();
@@ -1595,8 +1589,6 @@ export function sanitizedNodeEnvironment(
 function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
   return [
     'const fs = require("node:fs");',
-    'const diagnose = (stage) => { try { fs.writeSync(2, "[paperclip-acpx-launch] " + stage + "\\n"); } catch {} };',
-    'diagnose("bootstrap_started");',
     'const { isBuiltin, registerHooks } = require("node:module");',
     'const { dirname, extname, join, normalize, relative, resolve } = require("node:path");',
     'const { fileURLToPath, pathToFileURL } = require("node:url");',
@@ -1654,7 +1646,6 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
     'const canonicalizeDescriptorResolution = (url) => { if (typeof url !== "string" || !url.startsWith("file:") || snapshotDescriptorAncestorIndex(url, directoryUrl, dependencyDirectoryUrls) < 0) return url; try { return pathToFileURL(fs.realpathSync(fileURLToPath(url))).href; } catch { const error = new Error("ACPX provider module could not be canonicalized through its retained descriptor"); error.code = "ERR_ACPX_UNVERIFIED_MODULE"; throw error; } };',
     'const rememberDependencyAncestor = (specifier, resolution) => { const canonicalUrl = canonicalizeDescriptorResolution(resolution?.url); const pinned = snapshotDescriptorResolution(canonicalUrl, directoryUrl, dependencyDirectoryUrls, canonicalDirectoryUrl, canonicalDependencyDirectoryUrls); guardSnapshotModuleResolution(isBuiltin(specifier), resolution?.url, pinned !== null); if (pinned !== null && typeof resolution?.url === "string") { for (const rememberedUrl of [resolution.url, canonicalUrl, pinned.url]) { if (typeof rememberedUrl !== "string") continue; dependencyAncestorByUrl.set(rememberedUrl, pinned.ancestorIndex); if (typeof resolution.format === "string") descriptorFormatByUrl.set(rememberedUrl, resolution.format); } } return pinned === null || pinned.url === resolution?.url ? resolution : { ...resolution, url: pinned.url }; };',
     `const source = fs.readFileSync(${COMMAND_SOURCE_FD});`,
-    'diagnose("source_loaded");',
     "let resolvingDescriptorBare = false;",
     "const resolveBareFromDescriptor = (specifier, dependencyDirectoryUrl) => { resolvingDescriptorBare = true; try { return require.resolve(specifier, { paths: [fileURLToPath(dependencyDirectoryUrl)] }); } finally { resolvingDescriptorBare = false; } };",
     "registerHooks({ resolve(specifier, context, nextResolve) {",
@@ -1730,8 +1721,7 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
     "} finally { fs.closeSync(moduleFd); }",
     "});",
     "} });",
-    'diagnose("import_started");',
-    'import(target).then(() => diagnose("import_resolved"), (error) => { const code = String(error?.code || error?.name || "unknown").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64); diagnose("import_rejected_" + code); console.error(error); process.exitCode = 1; });',
+    "import(target).catch((error) => { console.error(error); process.exitCode = 1; });",
   ].join("");
 }
 

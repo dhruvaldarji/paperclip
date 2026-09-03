@@ -54,7 +54,7 @@ const activeCodexRuntimeCleanupOwners = new Set<Promise<unknown>>();
 // Provider initialization may include a cold native app-server start on a
 // minimally provisioned runner. Keep admission finite while allowing the
 // qualified runtime enough time to complete that local handshake.
-const SESSION_HANDSHAKE_TIMEOUT_MS = 12_000;
+const SESSION_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 class AcpxRuntimeCloseTimeoutError extends Error {
   constructor() {
@@ -268,13 +268,6 @@ export async function openQualifiedAcpxRuntime(
         : {}),
     }),
     spawnCwd: options.cwd,
-    onAgentStderr: (chunk) => {
-      for (const line of chunk.split(/\r?\n/)) {
-        if (line.startsWith("[paperclip-acpx-launch] ")) {
-          process.stderr.write(`${line}\n`);
-        }
-      }
-    },
     spawnAgent: (input) => {
       // ACPX can invoke this callback after its handshake caller has already
       // been cancelled. Check at the last host-owned boundary so a late

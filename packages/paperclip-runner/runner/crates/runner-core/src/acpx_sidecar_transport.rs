@@ -277,13 +277,14 @@ impl AcpxSidecarTransport {
                         ));
                     }
                     let error = response.error.expect("failed response has validated error");
-                    return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(format!(
-                        "ACPX sidecar command {} was rejected (retryable={}, classification={}){}",
-                        command.as_str(),
-                        error.retryable,
-                        response_error_classification(&error),
-                        self.diagnostic_suffix(),
-                    ))));
+                    return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(
+                        format!(
+                            "ACPX sidecar command {} was rejected (retryable={}, classification={})",
+                            command.as_str(),
+                            error.retryable,
+                            response_error_classification(&error),
+                        ),
+                    )));
                 }
             }
         }
@@ -590,13 +591,7 @@ fn nullable_identifier(
 }
 
 fn redact_diagnostic(value: &str) -> String {
-    if value.starts_with("[paperclip-acpx-launch] ")
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "[]-_ ".contains(character))
-    {
-        value.to_owned()
-    } else if value.is_empty() {
+    if value.is_empty() {
         String::new()
     } else {
         "[REDACTED]".to_owned()
@@ -644,15 +639,6 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "ACPX_MODEL_STATUS_UNAVAILABLE" => return "model_status_unavailable",
         "ACPX_MODEL_SELECTION_UNAVAILABLE" => return "model_selection_unavailable",
         "ACPX_EFFECTIVE_MODEL_MISMATCH" => return "effective_model_mismatch",
-        "PAPERCLIP_ACPX_ADMISSION_RECOVERY_BINDING" => return "admission_recovery_binding",
-        "PAPERCLIP_ACPX_ADMISSION_INSTALLATION" => return "admission_installation",
-        "PAPERCLIP_ACPX_ADMISSION_SANDBOX" => return "admission_sandbox",
-        "PAPERCLIP_ACPX_ADMISSION_CREDENTIAL" => return "admission_credential",
-        "PAPERCLIP_ACPX_ADMISSION_PROVIDER_LIFETIME" => return "admission_provider_lifetime",
-        "PAPERCLIP_ACPX_ADMISSION_COMMAND" => return "admission_command",
-        "PAPERCLIP_ACPX_ADMISSION_TOOL_BRIDGE" => return "admission_tool_bridge",
-        "PAPERCLIP_ACPX_ADMISSION_RUNTIME" => return "admission_runtime",
-        "PAPERCLIP_ACPX_ADMISSION_VERIFICATION" => return "admission_verification",
         _ => {}
     }
     match error.message.as_str() {
