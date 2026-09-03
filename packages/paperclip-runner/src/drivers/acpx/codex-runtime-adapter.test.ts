@@ -1304,6 +1304,61 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
+  it("admits a verified provider that starts with the first recovered turn", async () => {
+    const runtime = fakeRuntime();
+    const child = fakeChild();
+    const command = fakeCommand();
+    vi.mocked(command.spawn).mockReturnValue(child);
+    let runtimeOptions: AcpRuntimeOptions | undefined;
+    let resolvePromptStarted: (() => void) | undefined;
+    const promptStarted = new Promise<void>((resolve) => {
+      resolvePromptStarted = resolve;
+    });
+    const rawTurn = {
+      requestId: "turn-recovered",
+      promptStarted,
+      events: { async *[Symbol.asyncIterator]() {} },
+      result: new Promise<never>(() => undefined),
+      cancel: vi.fn(),
+      closeStream: vi.fn(),
+    };
+    vi.mocked(runtime.startTurn).mockImplementation(() => {
+      queueMicrotask(() => {
+        runtimeOptions?.spawnAgent?.({
+          command: "ignored",
+          args: ["--stdio"],
+          options: {},
+        });
+        resolvePromptStarted?.();
+      });
+      return rawTurn;
+    });
+    const port = await openCodexAcpxRuntime(openOptions(command), {
+      createRegistry: () => registry(),
+      createStore: () => store(),
+      awaitProviderOwnership: providerOwnershipEstablished,
+      awaitProviderExit: providerOwnershipEstablished,
+      createRuntime: (options) => {
+        runtimeOptions = options;
+        return runtime;
+      },
+    });
+
+    const turn = port.startTurn({
+      text: "Resume the task.",
+      requestId: "turn-recovered",
+    });
+    await expect(turn.promptStarted).resolves.toBeUndefined();
+    expect(command.spawn).toHaveBeenCalledTimes(1);
+    expect(() =>
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      }),
+    ).toThrow("provider spawned after ownership admission was sealed");
+  });
+
   it("projects only ephemeral MCP bindings and applies fail-closed permissions", async () => {
     const runtime = fakeRuntime();
     let runtimeOptions: AcpRuntimeOptions | undefined;

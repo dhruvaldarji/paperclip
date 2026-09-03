@@ -17,6 +17,7 @@ import type {
   AcpxRuntimePort,
   AcpxRuntimePortIdentity,
   AcpxRuntimePortOpenOptions,
+  AcpxRuntimeTurn,
 } from "./runtime-host.js";
 import {
   assertVerifiedAcpxProviderPlatform,
@@ -1045,18 +1046,69 @@ function runtimePort(
         }
       : {}),
     startTurn(input) {
-      return runtime.startTurn({
-        handle,
-        text: input.text,
-        mode: "prompt",
-        requestId: input.requestId,
-        ...(input.signal ? { signal: input.signal } : {}),
-        ...(input.onElicitation ? { onElicitation: input.onElicitation } : {}),
-      });
+      const finishOwnershipAdmission =
+        children.beginLifetimeOwnershipAdmission();
+      let turn: AcpxRuntimeTurn;
+      try {
+        turn = runtime.startTurn({
+          handle,
+          text: input.text,
+          mode: "prompt",
+          requestId: input.requestId,
+          ...(input.signal ? { signal: input.signal } : {}),
+          ...(input.onElicitation
+            ? { onElicitation: input.onElicitation }
+            : {}),
+        });
+      } catch (error) {
+        void finishOwnershipAdmission().catch(() => undefined);
+        throw error;
+      }
+      return turnWithVerifiedLifetimeOwnership(turn, finishOwnershipAdmission);
     },
     close: closeRuntime,
   };
   return port;
+}
+
+function turnWithVerifiedLifetimeOwnership(
+  turn: AcpxRuntimeTurn,
+  finishOwnershipAdmission: () => Promise<void>,
+): AcpxRuntimeTurn {
+  // A persisted ACPX session can be loaded without starting an agent process.
+  // Keep the narrowly scoped turn admission open until either the provider has
+  // accepted the prompt or the turn has already terminalized. The synchronous
+  // stable-empty seal in SpawnedChildSet then rejects every later spawn.
+  const reachedAdmissionBoundary = Promise.race([
+    turn.promptStarted.then(
+      () => undefined,
+      () => undefined,
+    ),
+    turn.result.then(
+      () => undefined,
+      () => undefined,
+    ),
+  ]);
+  const ownershipVerified = reachedAdmissionBoundary.then(() =>
+    finishOwnershipAdmission(),
+  );
+  void ownershipVerified.catch(() => undefined);
+  return {
+    requestId: turn.requestId,
+    promptStarted: ownershipVerified.then(() => turn.promptStarted),
+    events: eventsAfterLifetimeOwnership(turn.events, ownershipVerified),
+    result: ownershipVerified.then(() => turn.result),
+    cancel: (input) => turn.cancel(input),
+    closeStream: (input) => turn.closeStream(input),
+  };
+}
+
+async function* eventsAfterLifetimeOwnership<T>(
+  events: AsyncIterable<T>,
+  ownershipVerified: Promise<void>,
+): AsyncIterable<T> {
+  await ownershipVerified;
+  yield* events;
 }
 
 async function persistedRuntimeStatus(
@@ -1304,17 +1356,38 @@ class SpawnedChildSet {
   }
 
   async verifyLifetimeOwnership(): Promise<void> {
-    for (;;) {
-      const ownership = this.#lifetimeOwnership.splice(0);
-      if (ownership.length === 0) {
-        // This check and seal are synchronous. Any spawn added while an
-        // earlier batch was pending is observed by the next loop iteration;
-        // no later provider can race admission after the stable-empty point.
-        this.#lifetimeOwnershipSealed = true;
-        return;
+    try {
+      for (;;) {
+        const ownership = this.#lifetimeOwnership.splice(0);
+        if (ownership.length === 0) {
+          // This check and seal are synchronous. Any spawn added while an
+          // earlier batch was pending is observed by the next loop iteration;
+          // no later provider can race admission after the stable-empty point.
+          this.#lifetimeOwnershipSealed = true;
+          return;
+        }
+        await Promise.all(ownership);
       }
-      await Promise.all(ownership);
+    } catch (error) {
+      this.#lifetimeOwnershipSealed = true;
+      throw error;
     }
+  }
+
+  beginLifetimeOwnershipAdmission(): () => Promise<void> {
+    if (this.#sealed) {
+      throw new Error("ACPX provider ownership admission is closed");
+    }
+    if (!this.#lifetimeOwnershipSealed) {
+      throw new Error("ACPX provider ownership admission is already active");
+    }
+    this.#lifetimeOwnershipSealed = false;
+    let finished = false;
+    return async () => {
+      if (finished) return;
+      finished = true;
+      await this.verifyLifetimeOwnership();
+    };
   }
 
   #track(child: ChildProcess, providerExit: ProviderExitObservation): void {
