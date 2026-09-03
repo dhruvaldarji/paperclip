@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1294,5 +1294,132 @@ describe("copyBackCodexAuth ancestor-directory replacement race protection on a 
     // copy-back never wrote through the swapped ancestor.
     expect(await readFile(path.join(outsideHostDir, "auth.json"), "utf8")).toBe(decoyAuth);
     expect(await readdir(outsideHostDir)).toEqual(["auth.json"]);
+  });
+});
+
+// On Linux every WRITE below the directory pin addresses the pinned
+// descriptor's own `/proc/self/fd/<fd>` alias, so a later swap of the plain
+// directory path text cannot redirect a write. The decision predicate's two
+// read arguments must resolve through that same pinned descriptor, not the
+// plain path text: a predicate that still reads the plain text after a swap
+// can compare the sandbox credential against a substituted host credential,
+// pick the wrong side, and let a write through the (correctly) pinned
+// descriptor install a stale sandbox copy over a genuinely valid, newer host
+// credential. A write-only fix cannot close this gap — only a matching
+// read-path fix can. This suite proves the read arguments resolve through
+// the pinned descriptor on Linux, the same as the write.
+describe("copyBackCodexAuth Linux decision-predicate reads through the pinned directory descriptor", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(async () => {
+    onAfterOpenCall = null;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const HOST_REAL_NEWEST = "2026-07-09T05:00:00Z";
+  const SANDBOX_REAL_OLDER = "2026-07-09T01:00:00Z";
+  const DECOY_HOST_OLDEST = "2026-07-09T00:00:00Z";
+
+  it("does not let a directory swap after the pin make the predicate read a decoy and overwrite a valid, newer host credential", async () => {
+    if (process.platform !== "linux") return;
+
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-pin-read-"));
+    cleanupDirs.push(rootDir);
+    const hostDir = path.join(rootDir, "codex-home");
+    // The pinned descriptor addresses the same inode no matter which name
+    // refers to it. This test renames the real, pinned-open directory aside
+    // under this name, right when the attack swaps the original name for a
+    // symbolic link, so it keeps a stable path to check the real directory's
+    // content afterward.
+    const hostDirReal = path.join(rootDir, "codex-home-real");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    // The real host credential is genuinely the newest of the three copies in
+    // this test. It must survive untouched.
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: HOST_REAL_NEWEST,
+      marker: "host-real-newest",
+    });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-pin-read-outside-"));
+    cleanupDirs.push(outsideDir);
+    // A decoy destination, older than even the sandbox copy, so a predicate
+    // that reads it instead of the real, newest host copy concludes the
+    // sandbox copy is the fresher side.
+    const decoyHostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: DECOY_HOST_OLDEST,
+      marker: "decoy-host-oldest",
+    });
+    await writeFile(path.join(outsideDir, "auth.json"), decoyHostAuth, { mode: 0o600 });
+
+    // The genuine sandbox copy is older than the real host copy, so the
+    // correct decision is "keep host" — nothing should ever be installed.
+    const sandboxAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: SANDBOX_REAL_OLDER,
+      marker: "sandbox-real-older",
+    });
+
+    // Fires right after the directory-pin `open` call resolves (the pin
+    // already passed the Linux real-path check). Re-arms itself so the swap
+    // lands right after the NEXT `open` call resolves instead — the one that
+    // creates the staging temp file inside the pinned directory. That is the
+    // earliest point a plain-path read can diverge from the pinned-descriptor
+    // write, so it is where a genuine "already pinned, now replaced" race
+    // would land.
+    onAfterOpenCall = async () => {
+      onAfterOpenCall = async (args: unknown[]) => {
+        const tempFileName = path.basename(String(args[0]));
+        await rename(hostDir, hostDirReal);
+        await symlink(outsideDir, hostDir);
+        // A decoy "source" at the exact staged-temp name a plain-path read
+        // would now resolve to — standing in for an attacker who learned the
+        // name, for example by watching the directory before the swap.
+        const decoySandboxAuth = subscriptionAuth({
+          accountId: "acct-same",
+          lastRefresh: SANDBOX_REAL_OLDER,
+          marker: "decoy-sandbox-source",
+        });
+        await writeFile(path.join(outsideDir, tempFileName), decoySandboxAuth, { mode: 0o600 });
+      };
+    };
+
+    const logs: string[] = [];
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      log: (line) => {
+        logs.push(line);
+      },
+    });
+
+    expect(outcome).toBe("kept-host");
+    // The real, newest host credential — reachable at the name this test
+    // renamed it to, the same inode the pinned descriptor addressed
+    // throughout — is untouched.
+    expect(await readFile(path.join(hostDirReal, "auth.json"), "utf8")).toBe(hostAuth);
+    expect(await readdir(hostDirReal)).toEqual(["auth.json"]);
+    // Nothing was ever written into the attacker's directory either.
+    expect(await readFile(path.join(outsideDir, "auth.json"), "utf8")).toBe(decoyHostAuth);
   });
 });

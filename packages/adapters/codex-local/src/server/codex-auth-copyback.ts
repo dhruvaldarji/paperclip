@@ -290,14 +290,18 @@ async function assertManagedCredentialAncestorsStillLive(
  * finally cleans it up otherwise), so a failure never leaves a partial file.
  * Never logs token bytes — only the decision outcome.
  *
- * The decision predicate (step 5) still reads its two files by plain path,
- * not through the pinned descriptor: it runs in a separate `node` child
- * process, and a file descriptor pinned in this process is not addressable
- * from that child's own `/proc/self/fd`. That read is comparison-only — it
- * can at most skew which side the predicate picks, never place attacker
- * bytes anywhere — so the descriptor pin is reserved for the two operations
- * that actually write: the temp-file create in step 4 and the `rename` in
- * step 6.
+ * The decision predicate (step 5) runs in a separate `node` child process, so
+ * it cannot use this process's `/proc/self/fd` alias — `self` inside that
+ * child would name the CHILD's own descriptor table, not this parent's. On
+ * Linux the predicate's two read arguments instead name the pinned
+ * descriptor through this parent process's real pid, `/proc/<pid>/fd/<fd>`, a
+ * kernel-maintained record any process with the same user id can read — so
+ * the read side resolves through the exact same pinned directory the write
+ * side (step 4's create and step 6's `rename`) already uses, and a later swap
+ * of the plain directory path text cannot make the two sides disagree. On a
+ * non-Linux platform, where `/proc` does not exist, the predicate still reads
+ * both files by the plain, re-verified directory path text, matching that
+ * platform's write side.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
   const { readSandboxAuth, hostAuthPath, companyId, log, resolveCacheEntryPath, env } = input;
@@ -438,17 +442,34 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         const writeDirPath =
           process.platform === "linux" ? `/proc/self/fd/${pinnedDir.fd}` : canonicalHostDir;
 
-        const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
+        // The decision predicate below runs in a separate `node` child
+        // process, so `/proc/self/fd` would name that CHILD's own descriptor
+        // table, not this parent's — `writeDirPath` above is unusable for a
+        // path this process hands to a different process. `/proc/<pid>/fd/<fd>`
+        // (this process's own real pid, not `self`) is a kernel-maintained
+        // record any process with the same user id can read, so it lets the
+        // child address the exact directory `pinnedDir` was opened against.
+        // On Linux this makes both predicate read arguments below resolve
+        // through the pinned descriptor, the same as every write above — a
+        // swap of the plain `canonicalHostDir` text after this point can no
+        // longer make the read side see a different directory than the write
+        // side. `/proc` does not exist on a non-Linux platform, so there
+        // `readDirPath` stays the plain `canonicalHostDir` text, unchanged
+        // from the write side's own non-Linux behavior.
+        const readDirPath =
+          process.platform === "linux" ? `/proc/${process.pid}/fd/${pinnedDir.fd}` : canonicalHostDir;
+
+        const canonicalHostAuthPath = path.join(readDirPath, hostAuthFileName);
 
         // Stage on the same filesystem as the host target so both the predicate read
         // and the final rename stay device-local (rename across devices is not
         // atomic and would fail with EXDEV). Both the create below and the rename
-        // that follows address the file through `writeDirPath` — the pinned
-        // directory descriptor on Linux, the plain re-verified directory text
-        // everywhere else — never through the original `canonicalHostDir` text
-        // again on Linux.
+        // that follows address the file through `writeDirPath`; the predicate read
+        // below addresses it through `readDirPath` instead — the pinned directory
+        // descriptor on Linux for both, the plain re-verified directory text
+        // everywhere else.
         const tempFileName = `.auth.json.copyback-${process.pid}-${randomUUID()}.tmp`;
-        const stagedTempPath = path.join(canonicalHostDir, tempFileName);
+        const stagedTempPath = path.join(readDirPath, tempFileName);
         const writeStagedTempPath = path.join(writeDirPath, tempFileName);
         const writeHostAuthPath = path.join(writeDirPath, hostAuthFileName);
 
@@ -474,12 +495,13 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
           await handle.close();
 
           // The decision predicate runs in a separate `node` child process, so
-          // it cannot address a descriptor pinned in this process — it reads
-          // both files by plain path. That read only feeds a comparison; it
-          // can skew which side the predicate picks but never places
-          // attacker-controlled bytes anywhere, so the descriptor pin (on
-          // Linux) is reserved for the create and the rename below, the two
-          // operations that actually write.
+          // it cannot address `writeDirPath`'s `/proc/self/fd` alias — `self`
+          // would name the CHILD's own descriptor table. `stagedTempPath` and
+          // `canonicalHostAuthPath` instead use `readDirPath`, which on Linux
+          // names this parent process's real pid, so the child reads through
+          // the same pinned descriptor every write above uses. That read only
+          // feeds a comparison; it can skew which side the predicate picks
+          // but never places attacker-controlled bytes anywhere on its own.
           const decision = await decideCodexAuthMerge(stagedTempPath, canonicalHostAuthPath, {
             errorLabel: "codex auth copy-back",
           });
