@@ -275,10 +275,19 @@ pub fn run_durable_runner<E: CommandExecutor>(
         for command in welcome.pending_commands {
             let (result, lifecycle) =
                 process_command(&mut state, &store, &config, &mut executor, &command)?;
+            if let Some(durable_lifecycle) = lifecycle.durable_state() {
+                persist_lifecycle_before_command_delivery(&mut state, &store, durable_lifecycle)?;
+            }
             lifecycle_after_reply = lifecycle_after_reply.merge(lifecycle);
             if let Err(error) = transport.send_json(&command_result_envelope(&state, &result)) {
                 state.record_diagnostic(error.to_string());
                 disconnected = true;
+                break;
+            }
+            if lifecycle.durable_state().is_some() {
+                // A terminal lifecycle command is the final command this
+                // process may accept. Flush its already-durable outbox below,
+                // then release the executor without observing later commands.
                 break;
             }
         }
@@ -290,12 +299,8 @@ pub fn run_durable_runner<E: CommandExecutor>(
             .durable_state()
             .filter(|_| !disconnected)
         {
-            persist_lifecycle_before_shutdown(
-                &mut state,
-                &store,
-                &mut executor,
-                durable_lifecycle,
-            )?;
+            debug_assert_eq!(state.lifecycle, durable_lifecycle);
+            executor.shutdown()?;
             return Ok(());
         }
         if disconnected {
@@ -370,6 +375,13 @@ pub fn run_durable_runner<E: CommandExecutor>(
                         })?;
                     let (result, lifecycle) =
                         process_command(&mut state, &store, &config, &mut executor, &command)?;
+                    if let Some(durable_lifecycle) = lifecycle.durable_state() {
+                        persist_lifecycle_before_command_delivery(
+                            &mut state,
+                            &store,
+                            durable_lifecycle,
+                        )?;
+                    }
                     let delivery = transport
                         .send_json(&command_result_envelope(&state, &result))
                         .and_then(|()| send_outbox(&mut transport, &state, &mut sent_source_seq));
@@ -381,12 +393,8 @@ pub fn run_durable_runner<E: CommandExecutor>(
                         break;
                     }
                     if let Some(durable_lifecycle) = lifecycle.durable_state() {
-                        persist_lifecycle_before_shutdown(
-                            &mut state,
-                            &store,
-                            &mut executor,
-                            durable_lifecycle,
-                        )?;
+                        debug_assert_eq!(state.lifecycle, durable_lifecycle);
+                        executor.shutdown()?;
                         return Ok(());
                     }
                 }
@@ -446,12 +454,22 @@ fn persist_lifecycle_before_shutdown<E: CommandExecutor>(
     executor: &mut E,
     lifecycle: &str,
 ) -> Result<(), DurableRunnerError> {
-    // A terminal command result is already durable before this boundary. Save
-    // its matching lifecycle before fallible provider cleanup so recovery can
-    // never replay a ready runner after the command itself became terminal.
-    state.lifecycle = lifecycle.to_owned();
-    store.save(state)?;
+    persist_lifecycle_before_command_delivery(state, store, lifecycle)?;
     executor.shutdown()
+}
+
+fn persist_lifecycle_before_command_delivery(
+    state: &mut DurableState,
+    store: &DurableStateStore,
+    lifecycle: &str,
+) -> Result<(), DurableRunnerError> {
+    // A terminal command result is already durable before this boundary. Save
+    // its matching lifecycle before exposing that result to the controller,
+    // then let the caller deliver the result before fallible provider cleanup.
+    // Recovery can therefore never observe a ready runner after the controller
+    // has already observed its terminal command result.
+    state.lifecycle = lifecycle.to_owned();
+    store.save(state)
 }
 
 fn poll_executor_events<E: CommandExecutor>(
