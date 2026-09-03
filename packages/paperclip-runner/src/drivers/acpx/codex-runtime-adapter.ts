@@ -23,6 +23,7 @@ import {
   awaitVerifiedAcpxProviderExit,
   awaitVerifiedAcpxProviderOwnership,
 } from "./installation-integrity.js";
+import type { AcpxModelStatus } from "./model-verification.js";
 import { decideAcpxPermission } from "./permission-policy.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
@@ -366,6 +367,7 @@ export async function openQualifiedAcpxRuntime(
       runtime,
       handle,
       requireIdentity(handle),
+      baseStore,
       children,
       runtimeCloseTimeoutMs,
     );
@@ -774,6 +776,7 @@ function runtimePort(
   runtime: AcpRuntime,
   handle: AcpRuntimeHandle,
   identity: AcpxRuntimePortIdentity,
+  sessionStore: AcpSessionStore,
   children: SpawnedChildSet,
   runtimeCloseTimeoutMs: number,
 ): AcpxRuntimePort {
@@ -1004,10 +1007,7 @@ function runtimePort(
       return structuredClone(identity);
     },
     async getStatus() {
-      if (!runtime.getStatus) {
-        throw new Error("The pinned ACPX runtime cannot report session status");
-      }
-      return structuredClone(await runtime.getStatus({ handle }));
+      return await persistedRuntimeStatus(sessionStore, handle, identity);
     },
     ...(runtime.setConfigOption
       ? {
@@ -1033,6 +1033,50 @@ function runtimePort(
     close: closeRuntime,
   };
   return port;
+}
+
+async function persistedRuntimeStatus(
+  sessionStore: AcpSessionStore,
+  handle: AcpRuntimeHandle,
+  identity: AcpxRuntimePortIdentity,
+): Promise<AcpxModelStatus> {
+  const recordId = handle.acpxRecordId ?? handle.sessionKey;
+  const record = await sessionStore.load(recordId);
+  if (!record) {
+    throw new Error(
+      "The pinned ACPX runtime omitted its persisted session record",
+    );
+  }
+  if (
+    record.acpxRecordId !== identity.acpxRecordId ||
+    record.acpSessionId !== identity.backendSessionId ||
+    record.agentSessionId !== identity.agentSessionId
+  ) {
+    throw new Error(
+      "The persisted ACPX session identity changed after admission",
+    );
+  }
+  const currentModelId = record.acpx?.current_model_id;
+  const availableModelIds = record.acpx?.available_models;
+  return {
+    summary: [
+      `session=${record.acpxRecordId}`,
+      `backendSessionId=${record.acpSessionId}`,
+      `agentSessionId=${record.agentSessionId}`,
+      record.closed === true ? "closed" : "open",
+    ].join(" "),
+    acpxRecordId: record.acpxRecordId,
+    backendSessionId: record.acpSessionId,
+    agentSessionId: record.agentSessionId,
+    ...(currentModelId === undefined && !availableModelIds?.length
+      ? {}
+      : {
+          models: {
+            ...(currentModelId === undefined ? {} : { currentModelId }),
+            availableModelIds: availableModelIds ? [...availableModelIds] : [],
+          },
+        }),
+  };
 }
 
 function runtimeCloseOutcome(
