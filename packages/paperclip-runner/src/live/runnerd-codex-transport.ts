@@ -60,7 +60,12 @@ import {
   releaseMaterializedNativeRuntimeSkills,
 } from "../drivers/runtime-context-materializer.js";
 
-const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+// URL directory conversion preserves a trailing separator while path-derived
+// build artifacts do not. Normalize once so a source build cannot be
+// misclassified as an external provider pack by a string-only comparison.
+const packageRoot = resolve(
+  fileURLToPath(new URL("../..", import.meta.url)),
+);
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const MAX_NOTIFICATION_COUNT = 2_048;
 const MAX_NOTIFICATION_BYTES = 4 * 1024 * 1024;

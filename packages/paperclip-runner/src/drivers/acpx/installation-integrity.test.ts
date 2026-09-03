@@ -89,6 +89,8 @@ describe("ACPX installation integrity", () => {
     await Promise.all([
       mkdir(join(runnerPackage, "node_modules"), { recursive: true }),
       mkdir(pnpmProviderDirectory, { recursive: true }),
+    ]);
+    await Promise.all([
       writeFile(runnerManifest, JSON.stringify({ private: true })),
       writeFile(
         join(pnpmProviderDirectory, "package.json"),

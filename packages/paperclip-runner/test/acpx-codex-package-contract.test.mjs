@@ -30,6 +30,10 @@ const claudePatch = await readFile(
   ),
   "utf8",
 );
+const nodePatch = await readFile(
+  new URL("../../../patches/node@24.11.0.patch", import.meta.url),
+  "utf8",
+);
 
 test("the runner pins every qualified ACPX production dependency", () => {
   assert.equal(runnerPackage.dependencies.node, "24.11.0");
@@ -86,6 +90,13 @@ test("old and new pnpm configuration both apply the exact runtime patches", () =
     workspace,
     /claude-agent-acp@0\.70\.0': patches\/@agentclientprotocol__claude-agent-acp@0\.70\.0\.patch/,
   );
+  assert.equal(
+    rootPackage.pnpm.patchedDependencies["node@24.11.0"],
+    "patches/node@24.11.0.patch",
+  );
+  assert.match(workspace, /node@24\.11\.0: patches\/node@24\.11\.0\.patch/);
+  assert.match(nodePatch, /-  "bin": \{/);
+  assert.match(nodePatch, /-    "node": "bin\/node"/);
 });
 
 test("the ACPX patch preserves launch-only state and verified spawning", () => {
