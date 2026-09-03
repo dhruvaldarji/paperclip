@@ -82,8 +82,13 @@ describe("ACPX installation integrity", () => {
     await mkdir(nestedDependencyDirectory, { recursive: true });
     await writeFile(
       nestedDependencyPackageJson,
-      JSON.stringify({ name: "qualified-dependency", version: "1.0.0" }),
+      JSON.stringify({
+        name: "qualified-dependency",
+        version: "1.0.0",
+        exports: "./index.js",
+      }),
     );
+    await writeFile(join(nestedDependencyDirectory, "index.js"), "export {};");
     expect(
       createAcpxPackageJsonResolver(root)(
         "qualified-dependency",
@@ -548,6 +553,18 @@ describe("ACPX installation integrity", () => {
       "ACPX claude dependency package version mismatch for @agentclientprotocol/sdk",
     );
   });
+
+  it.runIf(process.platform === "linux" && process.arch === "x64")(
+    "resolves and pins the installed Claude ACP dependency graph",
+    async () => {
+      const profile = resolveQualifiedAcpxProfile("claude", "claude-sonnet-5");
+      const installation = await verifyQualifiedAcpxInstallation(profile);
+      expect(installation.agentServerPackageJsonPath).toContain(
+        "/@agentclientprotocol/claude-agent-acp/package.json",
+      );
+      await (await installation.openCommand()).close();
+    },
+  );
 
   it.runIf(process.platform === "linux" && process.arch === "x64")(
     "resolves and pins the qualified Codex native runtime through its transitive packages",
