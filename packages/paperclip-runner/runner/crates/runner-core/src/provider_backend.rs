@@ -2810,6 +2810,11 @@ impl CommandExecutor for CodexCommandExecutor {
     }
 
     fn shutdown(&mut self) -> Result<(), DurableRunnerError> {
+        // Terminal-result recovery can invoke shutdown on a fresh executor.
+        // Loading the durable provider identity here ensures that cleanup is
+        // attempted against the persisted session instead of reporting a
+        // successful no-op from an empty in-memory provider slot.
+        self.restore()?;
         if let Some(provider) = self.provider.as_mut() {
             provider.shutdown().map_err(|error| {
                 DurableRunnerError::invalid(format!("failed to stop Codex provider: {error}"))

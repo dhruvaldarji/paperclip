@@ -116,6 +116,14 @@ fn opencode_config(state_dir: &Path) -> DurableRunnerConfig {
     config
 }
 
+fn opencode_call_count(state_dir: &Path, method: &str) -> usize {
+    fs::read_to_string(state_dir.join("fake-opencode-calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| *line == method)
+        .count()
+}
+
 fn command(sequence: u64, command_type: &str, payload: Value) -> Command {
     Command {
         schema: "paperclip.prp.command.v1".to_owned(),
@@ -425,6 +433,37 @@ fn executes_opencode_through_the_local_facade_without_codex_event_labels() {
 }
 
 #[test]
+fn replacement_shutdown_restores_the_persisted_provider_before_cleanup() {
+    let directory = temporary_directory("opencode-replacement-shutdown");
+    let config = opencode_config(&directory);
+    let mut first = NativeProviderCommandExecutor::with_runner_config(&directory, &config);
+
+    first
+        .execute(&command(
+            1,
+            "run.prepare",
+            opencode_prepare_payload(&directory),
+        ))
+        .unwrap();
+    first
+        .execute(&command(2, "session.open", json!({})))
+        .unwrap();
+    first.shutdown().unwrap();
+    drop(first);
+
+    let resumes_before_cleanup = opencode_call_count(&directory, "thread/resume");
+    let mut replacement = NativeProviderCommandExecutor::with_runner_config(&directory, &config);
+    replacement.shutdown().unwrap();
+
+    assert_eq!(
+        opencode_call_count(&directory, "thread/resume"),
+        resumes_before_cleanup + 1,
+        "a replacement executor must restore the persisted provider before terminal cleanup",
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn rejects_a_mutable_opencode_command_outside_the_runner_launch_profile() {
     let directory = temporary_directory("opencode-command-override");
     let config = opencode_config(&directory);
@@ -490,7 +529,12 @@ fn rejects_opencode_launch_profile_drift_across_fresh_recovery() {
         .contains("launch profile changed across durable recovery"));
     assert_eq!(fs::read(&state_path).unwrap(), state_before_recovery);
 
-    recovered.shutdown().unwrap();
+    let shutdown_error = recovered
+        .shutdown()
+        .expect_err("invalid recovered launch authority also blocks cleanup");
+    assert!(shutdown_error
+        .to_string()
+        .contains("launch profile changed across durable recovery"));
     fs::remove_dir_all(directory).unwrap();
 }
 
