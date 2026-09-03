@@ -95,6 +95,13 @@ async function resolveRealPathAllowingMissingSegments(candidateDir: string): Pro
  *
  * Rejects with {@link REJECTED_CREDENTIAL_HOME_MESSAGE} when:
  * - the instance root does not exist.
+ * - `PAPERCLIP_HOME`, its `instances` directory, or the instance root itself
+ *   is a symbolic link, or sits anywhere other than its own literal,
+ *   unresolved path once resolved — this stops a redirected ancestor from
+ *   being silently adopted as the credential-write boundary. A redirected
+ *   ancestor moves BOTH the instance root and the `companies` directory
+ *   through the same target, so the `companies`-only check below cannot
+ *   catch it on its own; this check must run first.
  * - the `companies` directory does not exist.
  * - the `companies` directory is a symbolic link, or sits anywhere other
  *   than `<realInstanceRoot>/companies` once resolved — this stops a
@@ -121,6 +128,18 @@ export async function resolveManagedCredentialHomeBoundary(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") rejectCredentialHome();
     throw error;
+  }
+
+  // A symbolic link anywhere up the ancestor chain — `PAPERCLIP_HOME`, its
+  // `instances` directory, or the instance root itself — redirects
+  // `realInstanceRoot` to an external location. The `companies`-root check
+  // below re-derives its expected value from `realInstanceRoot`, so it
+  // resolves through the SAME redirect on both sides and cannot detect this
+  // on its own. Require the resolved instance root to equal the literal,
+  // unresolved `instanceRoot`; a difference means some ancestor component is
+  // a symbolic link, so reject before it can be adopted as the boundary.
+  if (realInstanceRoot !== instanceRoot) {
+    rejectCredentialHome();
   }
 
   let realCompaniesRoot: string;

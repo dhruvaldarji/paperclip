@@ -177,6 +177,33 @@ describe("assertManagedCredentialHome", () => {
     ).rejects.toThrow("outside the company-managed directory tree");
   });
 
+  it("rejects an instance root reached through a symbolic-link ancestor", async () => {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-managed-credential-home-"));
+    cleanupDirs.push(homeDir);
+    const externalInstancesTarget = await mkdtemp(
+      path.join(os.tmpdir(), "paperclip-external-instances-"),
+    );
+    cleanupDirs.push(externalInstancesTarget);
+    const companyId = "company-a";
+    const externalInstanceRoot = path.join(externalInstancesTarget, "default");
+    const externalCompanyDir = path.join(externalInstanceRoot, "companies", companyId);
+    await mkdir(externalCompanyDir, { recursive: true });
+    // `PAPERCLIP_HOME/instances` is a symbolic link to an external directory.
+    // Both the instance root and the `companies` directory resolve through
+    // this SAME redirect, so a check that only compares the two resolved
+    // paths against each other would still pass.
+    await symlink(externalInstancesTarget, path.join(homeDir, "instances"), "dir");
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+
+    await expect(
+      assertManagedCredentialHome({
+        env,
+        companyId,
+        candidateDir: path.join(externalCompanyDir, "codex-home"),
+      }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
   it("rejects a candidate symlink to another account home inside the same company", async () => {
     const { env, companyId, companyRoot } = await setUpInstance();
     const realAccountHome = path.join(companyRoot, "codex-homes", "account-b");
