@@ -15,8 +15,8 @@ use crate::durable::QualifiedLaunchArtifact;
 use crate::durable::{redact_text, OpenCodeLaunchProfile};
 use crate::local_runner::LocalRunnerError;
 use crate::process_supervisor::{
-    BoundedLogBuffer, ProcessOutput, SupervisedProcess, VerifiedProcessArgument,
-    VerifiedProcessLaunch,
+    is_node_interpreter, BoundedLogBuffer, ProcessOutput, SupervisedProcess,
+    VerifiedProcessArgument, VerifiedProcessLaunch,
 };
 use crate::provider_bridge::{AuthorizedTool, DurableReplayFilter, ToolResult};
 use crate::provider_events::normalized_codex_terminal_event_type;
@@ -1994,8 +1994,16 @@ fn verified_opencode_launch(
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
     let executable = verify_launch_artifact(&profile.executable, "OpenCode provider executable")
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
+    let proxy = if is_node_interpreter(&profile.command.path) {
+        VerifiedProcessArgument::CommonJsArtifact(proxy)
+    } else {
+        // Qualified test and alternate proxy commands own their ordinary
+        // argv contract. Only Node understands the runner-owned CommonJS
+        // descriptor loader flags.
+        VerifiedProcessArgument::Artifact(proxy)
+    };
     let args = vec![
-        VerifiedProcessArgument::CommonJsArtifact(proxy),
+        proxy,
         VerifiedProcessArgument::Literal(TRUSTED_OPENCODE_EXECUTABLE_ARG.to_owned()),
         VerifiedProcessArgument::ExecutableArtifact(executable),
     ];

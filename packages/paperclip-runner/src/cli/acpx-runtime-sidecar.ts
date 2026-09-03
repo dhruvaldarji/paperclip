@@ -54,6 +54,7 @@ import { validatePrpStructuredRunResult } from "../protocol/replay-contract.js";
 import type { RunnerToolCall } from "../drivers/runner-tool-bridge.js";
 import {
   acpxBootstrapBlockedError,
+  acpxSidecarErrorCode,
   enqueueAcpxSidecarInput,
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
@@ -182,15 +183,19 @@ async function receiveLine(line: string): Promise<void> {
   } catch (error) {
     const normalized =
       error instanceof Error ? error : new Error(String(error));
+    const normalizedRecord = record(normalized);
     bootstrapFailure = recordAcpxBootstrapFailure(
       bootstrapFailure,
       request.command,
       normalized,
     );
     response(request.id, false, undefined, {
-      code: safeCode(record(normalized).code, "acpx_sidecar_command_failed"),
+      code: safeCode(
+        acpxSidecarErrorCode(normalized),
+        "acpx_sidecar_command_failed",
+      ),
       message: safeMessage(normalized),
-      retryable: record(normalized).retryable === true,
+      retryable: normalizedRecord.retryable === true,
     });
   }
 }

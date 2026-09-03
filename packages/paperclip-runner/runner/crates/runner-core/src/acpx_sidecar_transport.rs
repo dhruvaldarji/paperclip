@@ -281,7 +281,7 @@ impl AcpxSidecarTransport {
                             "ACPX sidecar command {} was rejected (retryable={}, classification={})",
                             command.as_str(),
                             error.retryable,
-                            response_error_classification(&error.message),
+                            response_error_classification(&error),
                         ),
                     )));
                 }
@@ -597,8 +597,30 @@ fn redact_diagnostic(value: &str) -> String {
     }
 }
 
-fn response_error_classification(message: &str) -> &'static str {
-    match message {
+fn response_error_classification(error: &ResponseError) -> &'static str {
+    match error.code.as_str() {
+        "ACP_MODEL_UNSUPPORTED" => return "requested_model_unsupported",
+        "AGENT_STARTUP_FAILED" => return "agent_startup_failed",
+        "AGENT_STARTUP_FAILED.UNVERIFIED_MODULE" => return "agent_startup_unverified_module",
+        "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND" => return "agent_startup_module_not_found",
+        "AGENT_STARTUP_FAILED.PERMISSION_DENIED" => return "agent_startup_permission_denied",
+        "AGENT_STARTUP_FAILED.FILE_NOT_FOUND" => return "agent_startup_file_not_found",
+        "AGENT_STARTUP_FAILED.SYNTAX_ERROR" => return "agent_startup_syntax_error",
+        "AGENT_STARTUP_FAILED.INVALID_ARGUMENT" => return "agent_startup_invalid_argument",
+        "AGENT_STARTUP_FAILED.NO_STDERR" => return "agent_startup_no_stderr",
+        "AGENT_STARTUP_FAILED.SIGNAL" => return "agent_startup_signal",
+        "AGENT_STARTUP_FAILED.EXIT_NONZERO" => return "agent_startup_exit_nonzero",
+        "AGENT_STARTUP_FAILED.OTHER" => return "agent_startup_other",
+        "AGENT_DISCONNECTED" => return "agent_disconnected",
+        "AUTH_REQUIRED" => return "authentication_required",
+        "SESSION_RESUME_REQUIRED" => return "session_resume_required",
+        "SESSION_MODE_REPLAY_FAILED" => return "session_mode_replay_failed",
+        "SESSION_MODEL_REPLAY_FAILED" => return "session_model_replay_failed",
+        "SESSION_CONFIG_OPTION_REPLAY_FAILED" => return "session_config_option_replay_failed",
+        "CLAUDE_ACP_SESSION_CREATE_TIMEOUT" => return "claude_session_create_timeout",
+        _ => {}
+    }
+    match error.message.as_str() {
         "ACPX session handshake exceeded its admission deadline" => "session_handshake_timeout",
         "ACPX provider lifetime guardian exited before ownership transfer" => {
             "provider_guardian_exit"
@@ -606,6 +628,20 @@ fn response_error_classification(message: &str) -> &'static str {
         "ACPX provider lifetime guardian ownership timed out" => "provider_guardian_timeout",
         "ACPX session handshake and runtime cleanup failed" => "session_handshake_cleanup_failed",
         "ACPX runtime initialization and cleanup failed" => "runtime_initialization_cleanup_failed",
+        _ if error
+            .message
+            .starts_with("ACP agent exited before initialize completed") =>
+        {
+            "agent_startup_failed"
+        }
+        _ if error.message.starts_with("Failed to spawn agent command:") => "agent_spawn_failed",
+        _ if error
+            .message
+            .starts_with("ACP agent disconnected during request") =>
+        {
+            "agent_disconnected"
+        }
+        _ if error.message.starts_with("Authentication required") => "authentication_required",
         _ => "unclassified",
     }
 }
@@ -658,12 +694,31 @@ mod tests {
 
     #[test]
     fn classifies_only_allowlisted_internal_sidecar_failures() {
+        let error = |code: &str, message: &str| ResponseError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable: false,
+        };
         assert_eq!(
-            response_error_classification("ACPX session handshake exceeded its admission deadline"),
+            response_error_classification(&error(
+                "acpx_sidecar_command_failed",
+                "ACPX session handshake exceeded its admission deadline",
+            )),
             "session_handshake_timeout"
         );
         assert_eq!(
-            response_error_classification("violet-circuit-4821"),
+            response_error_classification(&error("ACP_MODEL_UNSUPPORTED", "violet-circuit-4821",)),
+            "requested_model_unsupported"
+        );
+        assert_eq!(
+            response_error_classification(&error(
+                "acpx_sidecar_command_failed",
+                "ACP agent exited before initialize completed (exit=1, signal=null): violet-circuit-4821",
+            )),
+            "agent_startup_failed"
+        );
+        assert_eq!(
+            response_error_classification(&error("VIOLET_CIRCUIT", "violet-circuit-4821")),
             "unclassified"
         );
     }

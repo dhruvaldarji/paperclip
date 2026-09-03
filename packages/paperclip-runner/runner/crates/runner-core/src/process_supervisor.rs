@@ -29,6 +29,12 @@ const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
 const VERIFIED_RUNTIME_EXECUTABLE_ENV: &str = "PAPERCLIP_VERIFIED_RUNTIME_EXECUTABLE";
 const VERIFIED_COMMONJS_ARTIFACT_LOADER: &str = r#"const fs=require("node:fs");const Module=require("node:module");const filename=process.argv[1];const source=fs.readFileSync(filename,"utf8").replace(/^#![^\r\n]*(?:\r?\n|$)/,"");const artifact=new Module(filename);artifact.filename=filename;artifact.paths=[];artifact._compile(source,filename);"#;
 
+pub(crate) fn is_node_interpreter(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "node" | "nodejs" | "node.exe"))
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifiedProcessArtifact {
     display_path: PathBuf,

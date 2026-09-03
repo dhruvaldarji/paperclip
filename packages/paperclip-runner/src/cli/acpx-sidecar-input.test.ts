@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   acpxBootstrapBlockedError,
+  acpxSidecarErrorCode,
   enqueueAcpxSidecarInput,
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
@@ -111,5 +112,34 @@ describe("ACPX sidecar input sequencing", () => {
       recordAcpxBootstrapFailure(null, "turn.start", new Error("turn failed")),
     ).toBeNull();
     expect(acpxBootstrapBlockedError(null, "turn.start")).toBeNull();
+  });
+
+  it("preserves stable ACPX error identities without copying startup stderr", () => {
+    const missingModule = Object.assign(new Error("provider exited"), {
+      detailCode: "AGENT_STARTUP_FAILED",
+      stderrSummary:
+        "Error [ERR_MODULE_NOT_FOUND]: violet-circuit-4821 was not found",
+      exitCode: 1,
+    });
+    const opaqueExit = Object.assign(new Error("provider exited"), {
+      detailCode: "AGENT_STARTUP_FAILED",
+      stderrSummary: "violet-circuit-4821",
+      exitCode: 1,
+    });
+    const model = Object.assign(new Error("model rejected"), {
+      code: "ACP_MODEL_UNSUPPORTED",
+      detailCode: "AGENT_STARTUP_FAILED",
+    });
+
+    expect(acpxSidecarErrorCode(missingModule)).toBe(
+      "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
+    );
+    expect(acpxSidecarErrorCode(opaqueExit)).toBe(
+      "AGENT_STARTUP_FAILED.EXIT_NONZERO",
+    );
+    expect(acpxSidecarErrorCode(opaqueExit)).not.toContain(
+      "violet-circuit-4821",
+    );
+    expect(acpxSidecarErrorCode(model)).toBe("ACP_MODEL_UNSUPPORTED");
   });
 });
