@@ -619,6 +619,10 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "SESSION_CONFIG_OPTION_REPLAY_FAILED" => return "session_config_option_replay_failed",
         "CLAUDE_ACP_SESSION_CREATE_TIMEOUT" => return "claude_session_create_timeout",
         "ACPX_SESSION_HANDSHAKE_TIMEOUT" => return "session_handshake_timeout",
+        "ACPX_SESSION_ENSURE_FAILED" => return "session_ensure_failed",
+        "ACPX_SESSION_ENSURE_TYPE_ERROR" => return "session_ensure_type_error",
+        "ACPX_SESSION_ENSURE_NON_ERROR" => return "session_ensure_non_error",
+        "ACP_SESSION_INIT_FAILED" => return "acp_session_init_failed",
         "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT" => {
             return "runtime_admission_verification_timeout"
         }
@@ -728,6 +732,13 @@ mod tests {
                 "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT",
                 "runtime_admission_verification_timeout",
             ),
+            ("ACPX_SESSION_ENSURE_FAILED", "session_ensure_failed"),
+            (
+                "ACPX_SESSION_ENSURE_TYPE_ERROR",
+                "session_ensure_type_error",
+            ),
+            ("ACPX_SESSION_ENSURE_NON_ERROR", "session_ensure_non_error"),
+            ("ACP_SESSION_INIT_FAILED", "acp_session_init_failed"),
             (
                 "ACPX_SIDECAR_STATUS_READ_TIMEOUT",
                 "session_status_read_timeout",

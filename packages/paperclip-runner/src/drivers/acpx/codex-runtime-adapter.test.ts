@@ -2100,6 +2100,7 @@ describe("Codex ACPX runtime adapter", () => {
         },
       }),
     ).rejects.toBe(failure);
+    expect(failure).toMatchObject({ code: "ACPX_SESSION_ENSURE_FAILED" });
     expect(runtime.close).toHaveBeenCalledOnce();
     const recoveredClose = vi.mocked(runtime.close).mock.calls[0]![0];
     expect(recoveredClose).toMatchObject({

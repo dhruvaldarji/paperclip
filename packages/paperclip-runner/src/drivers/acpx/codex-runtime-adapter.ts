@@ -288,20 +288,24 @@ export async function openQualifiedAcpxRuntime(
     runtimeCloseTimeoutMs,
   );
 
-  const handshake = Promise.resolve().then(() =>
-    runtime.ensureSession({
-      sessionKey: options.providerSessionKey,
-      agent: options.profile.agent,
-      mode: "persistent",
-      cwd: options.cwd,
-      sessionOptions: {
-        model: options.profile.qualificationModel,
-        ...(options.systemInstructions
-          ? { systemPrompt: { append: options.systemInstructions } }
-          : {}),
-      },
-    }),
-  );
+  const handshake = Promise.resolve()
+    .then(() =>
+      runtime.ensureSession({
+        sessionKey: options.providerSessionKey,
+        agent: options.profile.agent,
+        mode: "persistent",
+        cwd: options.cwd,
+        sessionOptions: {
+          model: options.profile.qualificationModel,
+          ...(options.systemInstructions
+            ? { systemPrompt: { append: options.systemInstructions } }
+            : {}),
+        },
+      }),
+    )
+    .catch((error: unknown) => {
+      throw classifySessionEnsureFailure(error);
+    });
   let handle: AcpRuntimeHandle | null = null;
   let lateCleanup: Promise<void> | null = null;
   try {
@@ -392,6 +396,22 @@ export async function openQualifiedAcpxRuntime(
 
 /** Backward-compatible name retained for existing Codex-only consumers. */
 export const openCodexAcpxRuntime = openQualifiedAcpxRuntime;
+
+function classifySessionEnsureFailure(error: unknown): Error {
+  if (error instanceof Error) {
+    const details = error as Error & Record<string, unknown>;
+    if (typeof details.code !== "string" || details.code.length === 0) {
+      details.code =
+        error instanceof TypeError
+          ? "ACPX_SESSION_ENSURE_TYPE_ERROR"
+          : "ACPX_SESSION_ENSURE_FAILED";
+    }
+    return error;
+  }
+  return Object.assign(new Error("ACPX session ensure rejected a non-error"), {
+    code: "ACPX_SESSION_ENSURE_NON_ERROR",
+  });
+}
 
 function raceRuntimeHandshakeWithAbort<T>(
   handshake: Promise<T>,
