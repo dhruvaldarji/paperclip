@@ -34,6 +34,28 @@ const nodePatch = await readFile(
   new URL("../../../patches/node@24.11.0.patch", import.meta.url),
   "utf8",
 );
+const qualifiedProfiles = await readFile(
+  new URL("../src/drivers/acpx/qualified-profiles.ts", import.meta.url),
+  "utf8",
+);
+const runnerdAcpxBackend = await readFile(
+  new URL(
+    "../runner/crates/runner-core/src/acpx_provider_backend.rs",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const providerPackBuilder = await readFile(
+  new URL("../scripts/build-provider-pack.mjs", import.meta.url),
+  "utf8",
+);
+const nativeSessionExecutor = await readFile(
+  new URL(
+    "../../../server/src/services/native-runtime/native-session-executor.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 test("the runner pins every qualified ACPX production dependency", () => {
   assert.equal(runnerPackage.dependencies.node, "24.11.0");
@@ -50,6 +72,27 @@ test("the runner pins every qualified ACPX production dependency", () => {
   assert.equal(
     runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"],
     "0.70.0",
+  );
+});
+
+test("the patched Codex ACP command digest stays aligned across launch boundaries", () => {
+  const profileMatch = /agent: "codex"[\s\S]*?commandDigest:\s*"(sha256:[a-f0-9]{64})"/.exec(
+    qualifiedProfiles,
+  );
+  assert.ok(profileMatch, "qualified Codex ACPX profile digest");
+  const digest = profileMatch[1];
+
+  assert.match(
+    runnerdAcpxBackend,
+    new RegExp(`"codex"[\\s\\S]*?${digest}`),
+  );
+  assert.match(
+    providerPackBuilder,
+    new RegExp(`acpxProfileDigests:[\\s\\S]*?codex:[\\s\\S]*?${digest}`),
+  );
+  assert.match(
+    nativeSessionExecutor,
+    new RegExp(`REMOTE_PROVIDER_PACK_PROFILE_DIGESTS[\\s\\S]*?codex:[\\s\\S]*?${digest}`),
   );
 });
 
