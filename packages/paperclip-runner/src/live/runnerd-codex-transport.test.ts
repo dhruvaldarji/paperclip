@@ -2079,3 +2079,44 @@ it("rejects the notification stream promptly when runnerd exits after accepting 
     await rm(stateDirectory, { recursive: true, force: true });
   }
 }, 30_000);
+
+it("persists an active provider as settled before bounded suspension", async () => {
+  const stateDirectory = await mkdtemp(
+    join(tmpdir(), "runnerd-active-suspension-"),
+  );
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(),
+    codexCommand: fakeCodex,
+    codexArgs: fakeCodexArgs(stateDirectory, "--linger-after-turn-start"),
+    stateDirectory,
+  });
+  bundle.transport.setServerRequestHandler(async () => ({
+    success: true,
+    contentItems: [],
+  }));
+  try {
+    await bundle.transport.request("initialize", {});
+    await bundle.transport.request("thread/start", {
+      cwd: tmpdir(),
+      dynamicTools: [],
+    });
+    await bundle.transport.request("turn/start", {
+      input: [{ type: "text", text: "Wait for another instruction." }],
+    });
+    await bundle.transport.close();
+
+    const providerState = JSON.parse(
+      await readFile(
+        join(stateDirectory, "runner", "codex-provider-state.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(providerState).toMatchObject({
+      lifecycle: "provider_exited",
+      activeProviderTurnId: null,
+    });
+  } finally {
+    await bundle.transport.close();
+    await rm(stateDirectory, { recursive: true, force: true });
+  }
+}, 30_000);

@@ -2120,6 +2120,80 @@ impl CodexCommandExecutor {
         })))
     }
 
+    fn stop_turn_for_suspension(
+        &mut self,
+        reason: &str,
+    ) -> Result<CommandExecution, DurableRunnerError> {
+        self.restore_provider_if_needed()?;
+        let provider_turn_id = self
+            .state
+            .as_ref()
+            .and_then(|state| state.active_provider_turn_id.clone());
+        let Some(provider_turn_id) = provider_turn_id else {
+            return Ok(CommandExecution::result(json!({
+                "status": "already_settled",
+                "reason": reason,
+            })));
+        };
+
+        // The cooperative interrupt is useful to the provider, but its RPC
+        // acknowledgement is not proof that an active turn stopped. A
+        // controller issues turn.stop only while closing a run whose result is
+        // already durable, so terminate the exact process generation before
+        // publishing the provider state as attachable by a successor run.
+        let interrupt_accepted = self.interrupt_turn(reason).is_ok();
+        let provider_shutdown_failed = self
+            .provider
+            .as_mut()
+            .is_some_and(|provider| provider.shutdown().is_err());
+        if provider_shutdown_failed {
+            return Err(DurableRunnerError::invalid(
+                "failed to prove provider termination at the suspension boundary",
+            ));
+        }
+        self.provider = None;
+
+        let identity = self.event_identity()?;
+        let state = self
+            .state
+            .as_mut()
+            .expect("Codex state remains available after provider termination");
+        state.settle_active_provider_turn_identity()?;
+        let settled = state
+            .tool_bridge
+            .settle_turn("provider_turn_stopped_for_suspension")
+            .map_err(|error| {
+                DurableRunnerError::invalid(format!(
+                    "failed to settle semantic tools at the suspension boundary: {error}"
+                ))
+            })?;
+        for result in settled {
+            state.push_terminal_event(semantic_result_event(&identity, &result))?;
+        }
+        state.active_provider_turn_id = None;
+        state.ambiguous_turn_start_pending = false;
+        state.completed_turn_authoritative = false;
+        state.completed_turn_process_generation = None;
+        state.completed_provider_turn_id = None;
+        state.receipt_limit_diagnostic_emitted = false;
+        state.receipt_limit_interrupt_pending = false;
+        state.receipt_limit_interrupt_accepted = false;
+        state.receipt_limit_interrupt_attempts = 0;
+        state.receipt_limit_interrupt_deadline_unix_ms = None;
+        state.active_provider_result_fingerprint = None;
+        state.active_provider_result_disposition = None;
+        state.last_agent_message = None;
+        state.lifecycle = "provider_exited".to_owned();
+        self.save_state()?;
+        Ok(CommandExecution::result(json!({
+            "status": "stopped",
+            "providerTurnId": provider_turn_id,
+            "reason": reason,
+            "interruptAccepted": interrupt_accepted,
+            "providerExitConfirmed": true,
+        })))
+    }
+
     fn steer_turn(&mut self, payload: &Value) -> Result<CommandExecution, DurableRunnerError> {
         let text = payload
             .get("text")
@@ -2912,9 +2986,8 @@ impl CommandExecutor for CodexCommandExecutor {
             "session.open" => self.open_session(),
             "turn.start" => self.start_turn(&command.payload),
             "turn.steer" => self.steer_turn(&command.payload),
-            "turn.interrupt" | "turn.stop" | "run.cancel" => {
-                self.interrupt_turn(&command.command_type)
-            }
+            "turn.interrupt" | "run.cancel" => self.interrupt_turn(&command.command_type),
+            "turn.stop" => self.stop_turn_for_suspension(&command.command_type),
             "request.resolve" => self.resolve_request(&command.payload),
             "semantic_tool.result" => self.deliver_semantic_result(&command.payload),
             "session.snapshot" => self.snapshot(),

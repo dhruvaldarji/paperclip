@@ -695,6 +695,30 @@ impl AcpxProviderSession {
         }
     }
 
+    /// Reaps an active provider generation at a controller-owned suspension
+    /// boundary without waiting for the provider's graceful close protocol.
+    ///
+    /// A governed Paperclip result can settle the run while the model is still
+    /// waiting for its semantic-tool callback to unwind. In that state the
+    /// ordinary sidecar close path may wait for the callback longer than the
+    /// server process that owns this runner. Process-group termination is the
+    /// fail-closed boundary: only after it proves the old generation is gone
+    /// may runnerd persist the durable session as attachable by the next run.
+    pub fn terminate_active_turn_for_suspension(
+        &mut self,
+        turn_id: &str,
+    ) -> Result<(), LocalRunnerError> {
+        self.ensure_open()?;
+        validate_stable_id(turn_id, DURABLE_STABLE_ID_CHARS, "ACPX turn id")?;
+        if self.state.active_turn_id() != Some(turn_id) {
+            return Err(LocalRunnerError::invalid(
+                "ACPX suspension termination named a stale or inactive turn",
+            ));
+        }
+        self.closed = true;
+        self.terminate_transport()
+    }
+
     fn terminate_transport(&mut self) -> Result<(), LocalRunnerError> {
         if self.transport_terminated {
             return Ok(());

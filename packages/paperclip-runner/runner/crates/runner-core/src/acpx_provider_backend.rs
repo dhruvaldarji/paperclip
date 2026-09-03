@@ -942,6 +942,45 @@ impl AcpxCommandExecutor {
         })))
     }
 
+    fn stop_turn_for_suspension(
+        &mut self,
+        reason: &str,
+    ) -> Result<CommandExecution, DurableRunnerError> {
+        let turn_id = self
+            .state
+            .as_ref()
+            .and_then(|state| state.active_turn_id.clone());
+        let Some(turn_id) = turn_id else {
+            return Ok(CommandExecution::result(json!({
+                "status": "already_settled",
+                "reason": reason,
+            })));
+        };
+        self.session
+            .as_mut()
+            .ok_or_else(|| DurableRunnerError::invalid("ACPX session is unavailable"))?
+            .terminate_active_turn_for_suspension(&turn_id)
+            .map_err(|error| {
+                DurableRunnerError::invalid(format!(
+                    "failed to terminate ACPX turn at the suspension boundary: {error}"
+                ))
+            })?;
+        self.session = None;
+        let state = self
+            .state
+            .as_mut()
+            .expect("ACPX state remains available after provider termination");
+        state.active_turn_id = None;
+        state.lifecycle = "suspended".to_owned();
+        self.save_state()?;
+        Ok(CommandExecution::result(json!({
+            "status": "stopped",
+            "providerTurnId": turn_id,
+            "reason": reason,
+            "providerExitConfirmed": true,
+        })))
+    }
+
     fn resolve_request(&mut self, payload: &Value) -> Result<CommandExecution, DurableRunnerError> {
         let request_id = payload
             .get("requestId")
@@ -1171,9 +1210,8 @@ impl CommandExecutor for AcpxCommandExecutor {
                 "code": "provider_command_unavailable",
                 "message": "ACPX does not support steering an active turn",
             }))),
-            "turn.interrupt" | "turn.stop" | "run.cancel" => {
-                self.interrupt_turn(&command.command_type)
-            }
+            "turn.interrupt" | "run.cancel" => self.interrupt_turn(&command.command_type),
+            "turn.stop" => self.stop_turn_for_suspension(&command.command_type),
             "request.resolve" => self.resolve_request(&command.payload),
             "semantic_tool.result" => self.deliver_tool_result(&command.payload),
             "session.snapshot" => self.snapshot(),
