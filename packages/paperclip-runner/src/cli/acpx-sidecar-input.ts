@@ -57,7 +57,15 @@ export function acpxSidecarErrorCode(error: Error): string {
 
 function directAcpxSidecarErrorCode(error: Error): string | null {
   const details = error as Error & Record<string, unknown>;
-  const outputCode = typeof details.code === "string" ? details.code : null;
+  // AcpxOperationalError publishes its presentation category as outputCode;
+  // Node/system errors conventionally use code. Accept the ACPX field first
+  // while retaining the latter for closed launch failures.
+  const outputCode =
+    typeof details.outputCode === "string"
+      ? details.outputCode
+      : typeof details.code === "string"
+        ? details.code
+        : null;
   const detailCode =
     typeof details.detailCode === "string" ? details.detailCode : null;
   // ACPX output errors may carry both a broad presentation code (for example,
