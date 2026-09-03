@@ -262,28 +262,37 @@ export const runnerProfiles: readonly RunnerProfileFixture[] = [
   }),
 ] as const;
 
+export const openRouterBreadthExcludedModelIds = ["xiaomi/mimo-v2.5"] as const;
+const openRouterBreadthExcludedModelIdSet = new Set<string>(
+  openRouterBreadthExcludedModelIds,
+);
+
 export const openRouterBreadthProfiles: readonly RunnerProfileFixture[] =
-  openRouterRankingSnapshot.models.map((rankedModel) =>
-    nativeProfile({
-      id: openRouterProfileId(rankedModel.id),
-      label: `#${rankedModel.rank} ${rankedModel.name}`,
-      provider: "opencode",
-      model: `openrouter/${rankedModel.id}`,
-      credential: "OPENROUTER_API_KEY",
-      supportedEnvironments: ["local"],
-      modelQualification: {
-        source: "openrouter_rankings_snapshot",
-        qualificationId: `${openRouterRankingSnapshot.snapshotId}:${rankedModel.rank}`,
-      },
-      ranking: {
-        rank: rankedModel.rank,
-        canonicalModelId: rankedModel.id,
-        snapshotId: openRouterRankingSnapshot.snapshotId,
-        capturedAt: openRouterRankingSnapshot.capturedAt,
-        sourceUrl: openRouterRankingSnapshot.sourceUrl,
-      },
-    }),
-  );
+  openRouterRankingSnapshot.models
+    .filter(
+      (rankedModel) => !openRouterBreadthExcludedModelIdSet.has(rankedModel.id),
+    )
+    .map((rankedModel) =>
+      nativeProfile({
+        id: openRouterProfileId(rankedModel.id),
+        label: `#${rankedModel.rank} ${rankedModel.name}`,
+        provider: "opencode",
+        model: `openrouter/${rankedModel.id}`,
+        credential: "OPENROUTER_API_KEY",
+        supportedEnvironments: ["local"],
+        modelQualification: {
+          source: "openrouter_rankings_snapshot",
+          qualificationId: `${openRouterRankingSnapshot.snapshotId}:${rankedModel.rank}`,
+        },
+        ranking: {
+          rank: rankedModel.rank,
+          canonicalModelId: rankedModel.id,
+          snapshotId: openRouterRankingSnapshot.snapshotId,
+          capturedAt: openRouterRankingSnapshot.capturedAt,
+          sourceUrl: openRouterRankingSnapshot.sourceUrl,
+        },
+      }),
+    );
 
 function requiredDaytonaSecret(input: EnvironmentFixtureBuildInput) {
   const apiKey = input.secretRefs.DAYTONA_API_KEY;
@@ -734,12 +743,13 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     profiles: openRouterBreadthProfiles,
     environments: [localEnvironment],
     tasks: openRouterBreadthTasks,
-    expectedMatrixSize: 15,
+    expectedMatrixSize: 12,
     definitionMetadata: {
       rankingSnapshotId: openRouterRankingSnapshot.snapshotId,
       rankingContentHash: openRouterRankingSnapshot.contentHash,
       rankingCapturedAt: openRouterRankingSnapshot.capturedAt,
       rankingSourceUrl: openRouterRankingSnapshot.sourceUrl,
+      excludedModelIds: openRouterBreadthExcludedModelIds,
     },
   },
 ] as const;
@@ -944,8 +954,8 @@ export function validateRunnerCatalog(): MatrixExecution[] {
       );
     }
   }
-  if (matrix.length !== 71)
-    throw new Error(`Expected 71 runner executions; received ${matrix.length}`);
+  if (matrix.length !== 68)
+    throw new Error(`Expected 68 runner executions; received ${matrix.length}`);
   return matrix;
 }
 

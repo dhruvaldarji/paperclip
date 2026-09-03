@@ -80,9 +80,11 @@ workflows: 42 cells. Its cases are:
   same Plan, browser acceptance of the new revision, and verified execution;
 - `ask-question`: a direct answer from a task created in Ask mode.
 
-`openrouter-model-breadth` (**OpenRouter Model Breadth**) is five models from
-the tracked weekly tool-capable ranking snapshot × native OpenCode × local ×
-three workflows: 15 cells. Its cases are:
+`openrouter-model-breadth` (**OpenRouter Model Breadth**) is four qualified
+models from the tracked weekly tool-capable ranking snapshot × native OpenCode
+× local × three workflows: 12 cells. Xiaomi MiMo V2.5 remains recorded in the
+immutable ranking snapshot but is excluded from paid qualification because its
+latency repeatedly exhausts the cell deadline. Its cases are:
 
 - `hello-complete`: a basic nonce response and explicit Done transition;
 - `question-resume-complete`: one structured question, browser selection of
@@ -98,7 +100,7 @@ duplicating the final response. The second workflow restarts the isolated
 Paperclip server while the interaction is waiting, reloads that state, and
 then resumes it. The suite has no Daytona cells.
 
-The complete catalog is 71 cells and 123 expected paid agent turns. Follow-up
+The complete catalog is 68 cells and 118 expected paid agent turns. Follow-up
 steps remain ordered within their cell; all other cells are independent.
 Narrow selectors are strongly recommended while developing fixtures.
 
@@ -290,7 +292,7 @@ Set `RUNNER_E2E_AWS_ENABLED=true` to route paid cells to the repository-scoped
 ephemeral AWS RunsOn fleet selected by
 `runs-on/fleet=paperclip-public-pr-x64/env=public-ci`. Any other value uses the
 proven GitHub-hosted `ubuntu-latest` target. Set `RUNNER_E2E_MAX_PARALLEL` to an
-integer from 1–100 on AWS (default 100); use at least 71 to run the current
+integer from 1–100 on AWS (default 100); use at least 68 to run the current
 complete catalog in one wave. The fallback runner retains its 1–57 limit and
 default of 32. Multi-turn steps are sequential inside their cell while
 independent cells overlap. Artifacts and merged HTML/JUnit/normalized reports
