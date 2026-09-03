@@ -239,7 +239,10 @@ impl AcpxProviderDescriptor {
         Ok(AcpxSidecarTransportConfig {
             command: launch_profile.command.clone(),
             args: launch_profile.args.clone(),
-            verified_launch: Some(VerifiedProcessLaunch::new(command, verified_args)),
+            verified_launch: Some(
+                VerifiedProcessLaunch::new(command, verified_args)
+                    .with_inherited_runtime_executable(),
+            ),
             request_timeout: Duration::from_secs(30),
             shutdown_grace: Duration::from_secs(2),
         })
