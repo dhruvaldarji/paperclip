@@ -1,9 +1,10 @@
-import { tmpdir } from "node:os";
-
 import { describe, expect, it } from "vitest";
 
 import type { NativeExecutionInput } from "../contracts/native-execution.js";
-import { FakeCodexTransport } from "../drivers/codex/codex-app-server-driver.test-support.js";
+import {
+  FakeCodexTransport,
+  WORKSPACE,
+} from "../drivers/codex/codex-app-server-driver.test-support.js";
 import { createNativeSessionBackend } from "../index.js";
 import { createCodexNativeSessionBackend } from "./codex-native-backend.js";
 
@@ -286,6 +287,10 @@ describe("native backend factory", () => {
       const transport = new FakeCodexTransport();
       const backend = createNativeSessionBackend(planningExecution(input), {
         codexTransportFactory: () => transport,
+        environment: {
+          ...process.env,
+          PAPERCLIP_WORKSPACE_CWD: WORKSPACE,
+        },
       });
 
       await expect(backend.descriptor()).resolves.toMatchObject({
@@ -299,7 +304,7 @@ describe("native backend factory", () => {
           issueId: "issue",
           agentId: "agent",
         },
-        workingDirectory: tmpdir(),
+        workingDirectory: WORKSPACE,
       });
 
       await expect(
