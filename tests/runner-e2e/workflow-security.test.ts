@@ -117,20 +117,60 @@ describe("public repository paid workflow security", () => {
     }
   });
 
-  it("prepares every local JS-backed provider before paid execution", async () => {
+  it("builds runner outputs once without provider credentials and verifies them in every paid cell", async () => {
     const workflow = await readFile(
       path.join(repositoryRoot, ".github/workflows/runner-full-stack-e2e.yml"),
       "utf8",
     );
-    const jsBackedLocalCondition =
-      "matrix.environmentId == 'local' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-') || matrix.suiteId == 'openrouter-model-breadth')";
+    const buildJobStart = workflow.indexOf("  build_runner_artifacts:");
+    const testJobStart = workflow.indexOf("  test:", buildJobStart);
+    const reportJobStart = workflow.indexOf("  report:", testJobStart);
+    const buildJob = workflow.slice(buildJobStart, testJobStart);
+    const testJob = workflow.slice(testJobStart, reportJobStart);
 
-    expect(workflow).toContain("Build local JS-backed provider artifacts");
-    expect(workflow).toContain("Qualify local provider Node interpreter");
-    expect(workflow.split(jsBackedLocalCondition)).toHaveLength(3);
-    expect(workflow).toContain(
+    expect(buildJobStart).toBeGreaterThan(0);
+    expect(testJobStart).toBeGreaterThan(buildJobStart);
+    expect(buildJob).toContain("needs: [authorize, catalog]");
+    expect(buildJob).toContain(
+      "needs: [authorize, catalog, daytona_image, build_runner_artifacts]",
+    );
+    expect(buildJob).not.toContain("environment:");
+    expect(buildJob).not.toContain("secrets.");
+    expect(buildJob).toContain(
       "pnpm --filter @paperclipai/paperclip-runner build:typescript",
     );
+    expect(buildJob).toContain(
+      "pnpm --filter @paperclipai/paperclip-runner build:runner-binaries",
+    );
+    expect(buildJob).toContain(
+      "node packages/paperclip-runner/scripts/build-provider-pack.mjs",
+    );
+    expect(buildJob).toContain("runner-e2e-build-bundle.tar.gz.sha256");
+    expect(buildJob).toContain("runner-e2e-provider-pack.tar.gz.sha256");
+    expect(buildJob).toContain(
+      "runner-e2e-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+    );
+    expect(workflow).toContain("needs_runner_typescript=");
+    expect(workflow).toContain("needs_native_binaries=");
+    expect(workflow).toContain("needs_remote_provider_pack=");
+
+    expect(testJob).toContain(
+      "needs: [catalog, daytona_image, build_runner_artifacts, build_remote_provider_pack]",
+    );
+    expect(testJob).toContain("Download immutable campaign outputs");
+    expect(testJob).toContain("Download immutable remote provider pack");
+    expect(testJob).toContain("sha256sum --check");
+    expect(testJob.indexOf("sha256sum --check")).toBeLessThan(
+      testJob.indexOf("tar --extract"),
+    );
+    expect(testJob).toContain(
+      "test -x packages/paperclip-runner/runner/target/debug/paperclip-runnerd",
+    );
+    expect(testJob).toContain(".payload.runnerSourceRevision == $revision");
+    expect(workflow).toContain("Qualify local provider Node interpreter");
+    expect(testJob).not.toContain("build:typescript");
+    expect(testJob).not.toContain("build:runner-binaries");
+    expect(testJob).not.toContain("build-provider-pack.mjs");
   });
 
   it("uses environment-scoped OIDC for a no-delete history publisher", async () => {
