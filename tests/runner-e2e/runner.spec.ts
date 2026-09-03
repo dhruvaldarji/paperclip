@@ -16,6 +16,7 @@ import {
   numberedPlanStepCount,
   providerSessionContinuityFailures,
 } from "./run-observations.js";
+import { resolveRunnerE2ESource } from "./source.js";
 import {
   assertSecretFree,
   findSecretLeakInJsonValues,
@@ -1804,16 +1805,7 @@ for (const execution of executions) {
         executionId: execution.id,
         suiteId: execution.suite.id,
         suiteDefinitionHash: execution.suiteDefinitionHash,
-        source: {
-          sha: process.env.GITHUB_SHA ?? null,
-          ref: process.env.GITHUB_REF ?? null,
-          workflowRunUrl:
-            process.env.GITHUB_SERVER_URL &&
-            process.env.GITHUB_REPOSITORY &&
-            process.env.GITHUB_RUN_ID
-              ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
-              : null,
-        },
+        source: resolveRunnerE2ESource(),
         ...(execution.profile.ranking
           ? { rankingSnapshot: execution.profile.ranking }
           : {}),

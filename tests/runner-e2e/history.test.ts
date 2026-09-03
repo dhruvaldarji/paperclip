@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runnerMatrix } from "./catalog.js";
 import { regenerateRunnerDashboard } from "./dashboard-regenerate.js";
 import { renderRunnerE2EDashboard } from "./dashboard.js";
@@ -24,6 +24,7 @@ import type { MatrixExecution, RunnerE2EResult } from "./types.js";
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -55,6 +56,35 @@ function result(execution: MatrixExecution, status: "passed" | "failed") {
 }
 
 describe("runner E2E campaign history", () => {
+  it("records the resolved paid target instead of the trusted workflow checkout", () => {
+    vi.stubEnv("PAPERCLIP_RUNNER_E2E_SOURCE_SHA", "target-sha");
+    vi.stubEnv("PAPERCLIP_RUNNER_E2E_SOURCE_REF", "refs/heads/target");
+    vi.stubEnv("GITHUB_SHA", "trusted-master-sha");
+    vi.stubEnv("GITHUB_REF", "refs/heads/master");
+    const execution = runnerMatrix[0]!;
+    const campaign = buildRunnerCampaign({
+      campaignId: "target-provenance",
+      generatedAt: "2026-08-28T00:01:00.000Z",
+      expected: [execution.id],
+      results: [
+        {
+          ...result(execution, "passed"),
+          source: {
+            sha: "retained-result-sha",
+            ref: "refs/heads/retained-result",
+            workflowRunUrl: "https://example.test/actions/runs/1",
+          },
+        },
+      ],
+    });
+
+    expect(campaign.source).toMatchObject({
+      sha: "target-sha",
+      ref: "refs/heads/target",
+      workflowRunUrl: "https://example.test/actions/runs/1",
+    });
+  });
+
   it("migrates v1 execution IDs and keeps partial suite runs out of overall trends", () => {
     expect(canonicalExecutionId("legacy-codex.local.message-marker")).toBe(
       "core-compatibility.legacy-codex.local.message-marker",
