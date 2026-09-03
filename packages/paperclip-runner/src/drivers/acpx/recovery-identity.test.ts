@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import {
   ACPX_IDENTITY_RECORD_SCHEMA,
+  acpxProviderSessionIdentity,
   createAcpxIdentityRecord,
   createAcpxRecoveryBinding,
   verifyExpectedAcpxIdentity,
@@ -39,6 +40,18 @@ describe("ACPX recovery identity", () => {
     expect(record).toMatchObject({
       schema: ACPX_IDENTITY_RECORD_SCHEMA,
       normalizedSessionId: "session-1",
+      permissionMode: "approve-reads",
+    });
+    expect(acpxProviderSessionIdentity(record)).toEqual({
+      kind: "acpx",
+      normalizedSessionId: "session-1",
+      acpxRecordId: fixture.expected.acpxRecordId,
+      backendSessionId: fixture.expected.backendSessionId,
+      agentSessionId: fixture.expected.agentSessionId,
+      profileDigest: fixture.binding.profileDigest,
+      workspaceDigest: fixture.binding.workspaceDigest,
+      requestedModel: fixture.binding.requestedModel,
+      effectiveModel: fixture.binding.effectiveModel,
       permissionMode: "approve-reads",
     });
     expect(() =>

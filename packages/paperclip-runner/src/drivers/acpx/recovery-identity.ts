@@ -114,6 +114,24 @@ export function createAcpxIdentityRecord(
   };
 }
 
+/** Project the private persisted record into the PRP sidecar wire identity. */
+export function acpxProviderSessionIdentity(
+  record: AcpxIdentityRecord,
+): AcpxExpectedSessionIdentity {
+  return {
+    kind: "acpx",
+    normalizedSessionId: record.normalizedSessionId,
+    acpxRecordId: record.acpxRecordId,
+    backendSessionId: record.backendSessionId,
+    agentSessionId: record.agentSessionId,
+    profileDigest: record.profileDigest,
+    workspaceDigest: record.workspaceDigest,
+    requestedModel: record.requestedModel,
+    effectiveModel: record.effectiveModel,
+    permissionMode: record.permissionMode,
+  };
+}
+
 /**
  * Verify both the controller-provided identity and a persisted runtime record.
  * Only the complete v1 record is recoverable. Draft schema-less and
