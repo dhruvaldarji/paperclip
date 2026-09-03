@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { useStreamlinedTaskChatPresentation } from "./presentation-mode";
 import { ArrowDown } from "lucide-react";
 import { parseCssTimeMs } from "./motion-tokens";
 
@@ -42,6 +43,7 @@ interface TaskMessageScrollerProps {
  * while pinned stays instant, so no reflow/jump happens during streaming.
  */
 export function TaskMessageScroller({ children, contentKey, className }: TaskMessageScrollerProps) {
+  const streamlined = useStreamlinedTaskChatPresentation();
   const ref = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
   const easingRef = useRef(false);
@@ -216,7 +218,11 @@ export function TaskMessageScroller({ children, contentKey, className }: TaskMes
         // absolute inset-0 (not h-full): the viewport must equal the flex-sized
         // wrapper exactly — percentage heights don't reliably resolve against
         // flex-determined block heights, which let the thread overflow the page.
-        className={cn("scrollbar-while-scrolling absolute inset-0 overflow-y-auto", className)}
+        className={cn(
+          "scrollbar-while-scrolling absolute inset-0 overflow-y-auto",
+          streamlined && "overflow-x-hidden",
+          className,
+        )}
         data-testid="task-chat-scroller"
       >
         {children}
@@ -232,7 +238,8 @@ export function TaskMessageScroller({ children, contentKey, className }: TaskMes
           // The tc-scroll-pill-* keyframes carry the translate(-50%) X-centering
           // (fill: both keeps it after the animation) — no -translate-x-1/2 here.
           className={cn(
-            "absolute bottom-3 left-1/2 flex size-8 items-center justify-center rounded-full border border-border bg-background shadow-sm hover:bg-muted",
+            "absolute left-1/2 flex size-8 items-center justify-center rounded-full border border-border bg-background shadow-sm hover:bg-muted",
+            streamlined ? "bottom-7" : "bottom-3",
             pillPhase === "out" ? "tc-scroll-pill-out" : "tc-scroll-pill-in",
           )}
         >
