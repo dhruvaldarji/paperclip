@@ -48,6 +48,8 @@ const ENTITY_TYPES: { value: string; label: string }[] = [
   { value: ALL, label: "All entities" },
   { value: "issue", label: "Task" },
   { value: "agent", label: "Agent" },
+  { value: "heartbeat_run", label: "Run" },
+  { value: "routine", label: "Routine" },
   { value: "project", label: "Project" },
   { value: "goal", label: "Goal" },
   { value: "company", label: "Organization" },
@@ -67,6 +69,10 @@ export interface AuditFeedProps {
    * agent filter is hidden and every query/export carries this agentId.
    */
   lockedAgentId?: string;
+  /** Pin the feed to one run while preserving the existing run-detail links. */
+  lockedRunId?: string;
+  /** Pin the feed to an entity such as a routine. */
+  lockedEntity?: { type: string; id: string; label?: string };
   /** Hide the section header/description (the AgentDetail tab supplies its own chrome). */
   hideHeader?: boolean;
   /**
@@ -260,6 +266,8 @@ function AuditUpsell() {
 export function AuditFeed({
   companyId,
   lockedAgentId,
+  lockedRunId,
+  lockedEntity,
   hideHeader,
   mode,
   onModeChange,
@@ -296,14 +304,17 @@ export function AuditFeed({
   // The per-agent tab keeps the legacy privileged scope because it always
   // carries an attribution filter and must not silently downgrade to the basic
   // tier. Everywhere else the mode picks the scope, defaulting to all actors.
-  const resolvedMode: AuditFeedMode = lockedAgentId ? "agents" : mode ?? "all";
+  const resolvedMode: AuditFeedMode = lockedAgentId || lockedRunId ? "agents" : mode ?? "all";
+  const hasLockedScope = Boolean(lockedAgentId || lockedRunId || lockedEntity);
 
   const filters: AuditActionFilters = {
     actorScope: resolvedMode,
     agentId: lockedAgentId ?? (agent === ALL ? undefined : agent),
+    runId: lockedRunId,
     responsibleUserId: responsibleUser === ALL ? undefined : responsibleUser,
     action: actionDomain === ALL ? undefined : actionDomain,
-    entityType: entityType === ALL ? undefined : entityType,
+    entityType: lockedEntity?.type ?? (entityType === ALL ? undefined : entityType),
+    entityId: lockedEntity?.id,
     from: toStartIso(dateFrom),
     to: toEndIso(dateTo),
   };
@@ -316,14 +327,19 @@ export function AuditFeed({
       || dateFrom
       || dateTo,
   );
+  const hasPrivilegedFilters = Boolean(
+    !hasLockedScope && (agent !== ALL || responsibleUser !== ALL),
+  );
 
   const feed = useInfiniteQuery({
     queryKey: queryKeys.audit.agentActions(companyId, {
       actorScope: filters.actorScope,
       agentId: filters.agentId,
+      runId: filters.runId,
       responsibleUserId: filters.responsibleUserId,
       action: filters.action,
       entityType: filters.entityType,
+      entityId: filters.entityId,
       from: filters.from,
       to: filters.to,
     }),
@@ -351,7 +367,7 @@ export function AuditFeed({
   // page as authoritative until every cached page has been fetched again.
   const accessTier = hasBasicPage ? "basic" : feed.data?.pages[0]?.accessTier;
   const hasMixedAccessTiers = hasBasicPage && hasFullPage;
-  const canUseAdvancedControls = lockedAgentId
+  const canUseAdvancedControls = lockedAgentId || lockedRunId
     ? true
     : accessTier === "full";
   // The recovery refetch below gets one shot. If it does not clear the mixed
@@ -366,23 +382,22 @@ export function AuditFeed({
     hasMixedAccessTiers && downgradeRecoveryAttempted && !feed.isFetching,
   );
   const recoveringFromAccessDowngrade = Boolean(
-    !lockedAgentId
+    !hasLockedScope
       && !downgradeRecoveryExhausted
-      && ((permissionDenied && hasActiveFilters) || hasMixedAccessTiers),
+      && ((permissionDenied && hasPrivilegedFilters) || hasMixedAccessTiers),
   );
   // A reader without `audit:view_agent_actions` can still land on the
   // agent-actions mode through an old `/audit` deep link. Drop them into the
   // shared all-activity feed instead of blocking the whole page with the upsell.
   const fallingBackToAllActivity = Boolean(
-    permissionDenied && !lockedAgentId && resolvedMode === "agents" && onModeChange,
+    permissionDenied && !hasLockedScope && resolvedMode === "agents" && onModeChange,
   );
-  // The privileged mode is only offered to callers the server already answered
-  // at the full tier — everyone else just gets the basic all-activity feed.
+  // Keep both modes explicit in the Audit IA. Basic readers can see that Agent
+  // Actions exists, but cannot switch into the privileged scope.
   const showModeToggle = Boolean(
-    !lockedAgentId
+    !hasLockedScope
       && onModeChange
       && !fallingBackToAllActivity
-      && (resolvedMode === "agents" || accessTier === "full"),
   );
 
   useEffect(() => {
@@ -390,15 +405,11 @@ export function AuditFeed({
   }, [fallingBackToAllActivity, onModeChange]);
 
   useEffect(() => {
-    if (!lockedAgentId && (accessTier === "basic" || recoveringFromAccessDowngrade)) {
+    if (!hasLockedScope && (accessTier === "basic" || recoveringFromAccessDowngrade)) {
       setAgent(ALL);
       setResponsibleUser(ALL);
-      setActionDomain(ALL);
-      setEntityType(ALL);
-      setDateFrom("");
-      setDateTo("");
     }
-  }, [accessTier, hasMixedAccessTiers, lockedAgentId, recoveringFromAccessDowngrade]);
+  }, [accessTier, hasLockedScope, recoveringFromAccessDowngrade]);
 
   // Recover from a mid-pagination downgrade with exactly one refetch. `feed`
   // gets a new identity on every render, so an unguarded refetch here re-fires
@@ -428,9 +439,11 @@ export function AuditFeed({
       const blob = await auditApi.exportAgentActionsCsv(companyId, {
         actorScope: filters.actorScope,
         agentId: filters.agentId,
+        runId: filters.runId,
         responsibleUserId: filters.responsibleUserId,
         action: filters.action,
         entityType: filters.entityType,
+        entityId: filters.entityId,
         from: filters.from,
         to: filters.to,
       });
@@ -465,7 +478,7 @@ export function AuditFeed({
       {!hideHeader ? (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-lg font-semibold text-foreground">Activity</h1>
+            <h2 className="text-lg font-semibold text-foreground">Activity</h2>
             <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
               {resolvedMode === "agents"
                 ? "Every recorded agent action, newest first — with the responsible person and run behind each one."
@@ -478,15 +491,32 @@ export function AuditFeed({
       {showModeToggle ? (
         <Tabs value={resolvedMode} onValueChange={(value) => onModeChange?.(value as AuditFeedMode)}>
           <TabsList aria-label="Activity scope">
-            <TabsTrigger value="all">All activity</TabsTrigger>
-            <TabsTrigger value="agents">Agent actions</TabsTrigger>
+            <TabsTrigger value="all">Activity</TabsTrigger>
+            <TabsTrigger
+              value="agents"
+              disabled={accessTier === "basic"}
+              title={accessTier === "basic" ? "Agent Actions requires audit access" : undefined}
+            >
+              Agent Actions
+            </TabsTrigger>
           </TabsList>
         </Tabs>
       ) : null}
 
-      {canUseAdvancedControls ? (
-        <div className="flex flex-wrap items-center gap-2">
-          {!lockedAgentId ? (
+      {hasLockedScope ? (
+        <div className="border-y border-border px-1 py-2 text-xs text-muted-foreground">
+          {lockedRunId
+            ? `Scoped to run ${lockedRunId.slice(0, 8)}`
+            : lockedAgentId
+              ? "Scoped to one agent"
+              : `Scoped to ${lockedEntity?.label ?? lockedEntity?.type ?? "entity"}`}
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-end gap-3 border-y border-border py-3">
+        {canUseAdvancedControls && !lockedAgentId && !lockedRunId ? (
+          <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+            <span>Agent</span>
             <Select value={agent} onValueChange={setAgent}>
               <SelectTrigger className="w-40">
                 <SelectValue placeholder="Agent" />
@@ -500,23 +530,31 @@ export function AuditFeed({
                 ))}
               </SelectContent>
             </Select>
-          ) : null}
-          <Select value={responsibleUser} onValueChange={setResponsibleUser}>
-            {/* Wide enough for "All responsible users" — w-44 truncated it. */}
-            <SelectTrigger className="w-52">
-              <SelectValue placeholder="Responsible user" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL}>All responsible users</SelectItem>
-              {(userDirectory.data?.users ?? []).map((u) => (
-                <SelectItem key={u.principalId} value={u.principalId}>
-                  {u.user?.name ?? u.user?.email ?? u.principalId.slice(0, 8)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          </label>
+        ) : null}
+        {canUseAdvancedControls ? (
+          <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+            <span>Responsible user</span>
+            <Select value={responsibleUser} onValueChange={setResponsibleUser}>
+              {/* Wide enough for "All responsible users" — w-44 truncated it. */}
+              <SelectTrigger className="w-52">
+                <SelectValue placeholder="Responsible user" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>All responsible users</SelectItem>
+                {(userDirectory.data?.users ?? []).map((u) => (
+                  <SelectItem key={u.principalId} value={u.principalId}>
+                    {u.user?.name ?? u.user?.email ?? u.principalId.slice(0, 8)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        ) : null}
+        <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+          <span>Action</span>
           <Select value={actionDomain} onValueChange={setActionDomain}>
-            <SelectTrigger className="w-36">
+            <SelectTrigger className="w-40">
               <SelectValue placeholder="Action" />
             </SelectTrigger>
             <SelectContent>
@@ -527,18 +565,26 @@ export function AuditFeed({
               ))}
             </SelectContent>
           </Select>
-          <Select value={entityType} onValueChange={setEntityType}>
-            <SelectTrigger className="w-36">
-              <SelectValue placeholder="Entity" />
-            </SelectTrigger>
-            <SelectContent>
-              {ENTITY_TYPES.map((e) => (
-                <SelectItem key={e.value} value={e.value}>
-                  {e.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        </label>
+        {!lockedEntity ? (
+          <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+            <span>Entity</span>
+            <Select value={entityType} onValueChange={setEntityType}>
+              <SelectTrigger className="w-40">
+                <SelectValue placeholder="Entity" />
+              </SelectTrigger>
+              <SelectContent>
+                {ENTITY_TYPES.map((e) => (
+                  <SelectItem key={e.value} value={e.value}>
+                    {e.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        ) : null}
+        <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+          <span>From</span>
           <Input
             type="date"
             aria-label="From date"
@@ -547,6 +593,9 @@ export function AuditFeed({
             onChange={(e) => setDateFrom(e.target.value)}
             className="w-36"
           />
+        </label>
+        <label className="grid gap-1 text-(length:--text-micro) font-medium text-muted-foreground">
+          <span>To</span>
           <Input
             type="date"
             aria-label="To date"
@@ -555,11 +604,13 @@ export function AuditFeed({
             onChange={(e) => setDateTo(e.target.value)}
             className="w-36"
           />
-          {hasActiveFilters ? (
-            <Button variant="ghost" size="sm" onClick={clearFilters}>
-              Clear filters
-            </Button>
-          ) : null}
+        </label>
+        {hasActiveFilters ? (
+          <Button variant="ghost" size="sm" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        ) : null}
+        {canUseAdvancedControls ? (
           <Button
             variant="outline"
             size="sm"
@@ -570,8 +621,8 @@ export function AuditFeed({
             <Download className="mr-1.5 h-4 w-4" />
             {exporting ? "Exporting…" : "Export CSV"}
           </Button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
       {recoveringFromAccessDowngrade || fallingBackToAllActivity ? (
         <Card>
@@ -618,20 +669,18 @@ export function AuditFeed({
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardContent className="px-0 py-0">
-            <ul className={cn("divide-y divide-border")}>
-              {items.map((record) => (
-                <AuditRow
-                  key={record.id}
-                  record={record}
-                  agentMap={agentMap}
-                  userProfileMap={userProfileMap}
-                />
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
+        <div className="border-y border-border">
+          <ul className={cn("divide-y divide-border")} aria-label="Audit activity">
+            {items.map((record) => (
+              <AuditRow
+                key={record.id}
+                record={record}
+                agentMap={agentMap}
+                userProfileMap={userProfileMap}
+              />
+            ))}
+          </ul>
+        </div>
       )}
 
       {feed.hasNextPage ? (

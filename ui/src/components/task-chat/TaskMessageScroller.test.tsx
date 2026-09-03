@@ -160,6 +160,13 @@ describe("TaskMessageScroller", () => {
     expect(el.getAttribute("data-scroll-active")).toBeNull();
   });
 
+  it("contains horizontal overflow so no scrollbar appears above the composer", () => {
+    render();
+
+    expect(scroller().classList).toContain("overflow-x-hidden");
+    expect(scroller().classList).toContain("overflow-y-auto");
+  });
+
   it("auto-follows content instantly while pinned", async () => {
     render(1);
     const el = scroller();
@@ -181,6 +188,8 @@ describe("TaskMessageScroller", () => {
     expect(btn).not.toBeNull();
     expect(btn!.className).toContain("tc-scroll-pill-in");
     expect(btn!.className).toContain("size-8");
+    expect(btn!.className).toContain("bottom-7");
+    expect(btn!.className).not.toContain("bottom-3");
     expect(btn!.className).not.toContain("-translate-x-1/2");
     // Icon-only: no visible text.
     expect(btn!.textContent).toBe("");
