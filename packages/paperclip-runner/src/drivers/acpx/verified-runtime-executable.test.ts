@@ -6,7 +6,7 @@ import {
 } from "./verified-runtime-executable.js";
 
 describe("verified runtime executable", () => {
-  it("anchors an inherited Linux descriptor at its current owner", () => {
+  it("projects an inherited Linux descriptor through the live process image", () => {
     expect(
       verifiedRuntimeExecutable(
         { [VERIFIED_RUNTIME_EXECUTABLE_ENV]: "/proc/self/fd/17" },
@@ -14,18 +14,29 @@ describe("verified runtime executable", () => {
         4321,
         "/usr/bin/node",
       ),
-    ).toBe("/proc/4321/fd/17");
+    ).toBe("/proc/self/exe");
   });
 
-  it("preserves an already anchored descendant runtime", () => {
+  it("preserves the live process image for verified descendants", () => {
     expect(
+      verifiedRuntimeExecutable(
+        { [VERIFIED_RUNTIME_EXECUTABLE_ENV]: "/proc/self/exe" },
+        "linux",
+        8765,
+        "/usr/bin/node",
+      ),
+    ).toBe("/proc/self/exe");
+  });
+
+  it("rejects ancestor descriptor paths at the verified boundary", () => {
+    expect(() =>
       verifiedRuntimeExecutable(
         { [VERIFIED_RUNTIME_EXECUTABLE_ENV]: "/proc/4321/fd/17" },
         "linux",
         8765,
         "/usr/bin/node",
       ),
-    ).toBe("/proc/4321/fd/17");
+    ).toThrow("descriptor is invalid");
   });
 
   it("rejects mutable Linux paths at the verified boundary", () => {

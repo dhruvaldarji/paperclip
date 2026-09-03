@@ -290,9 +290,12 @@ pub fn run_durable_runner<E: CommandExecutor>(
             .durable_state()
             .filter(|_| !disconnected)
         {
-            executor.shutdown()?;
-            state.lifecycle = durable_lifecycle.to_owned();
-            store.save(&state)?;
+            persist_lifecycle_before_shutdown(
+                &mut state,
+                &store,
+                &mut executor,
+                durable_lifecycle,
+            )?;
             return Ok(());
         }
         if disconnected {
@@ -378,9 +381,12 @@ pub fn run_durable_runner<E: CommandExecutor>(
                         break;
                     }
                     if let Some(durable_lifecycle) = lifecycle.durable_state() {
-                        executor.shutdown()?;
-                        state.lifecycle = durable_lifecycle.to_owned();
-                        store.save(&state)?;
+                        persist_lifecycle_before_shutdown(
+                            &mut state,
+                            &store,
+                            &mut executor,
+                            durable_lifecycle,
+                        )?;
                         return Ok(());
                     }
                 }
@@ -396,10 +402,13 @@ pub fn run_durable_runner<E: CommandExecutor>(
                             "revoke must advance the authenticated revocation epoch",
                         ));
                     }
-                    state.lifecycle = "revoked".to_owned();
                     state.record_diagnostic("connection capability was revoked");
-                    executor.shutdown()?;
-                    store.save(&state)?;
+                    persist_lifecycle_before_shutdown(
+                        &mut state,
+                        &store,
+                        &mut executor,
+                        "revoked",
+                    )?;
                     return Ok(());
                 }
                 Some("ping") => {
@@ -429,6 +438,20 @@ pub fn run_durable_runner<E: CommandExecutor>(
         let reconnect_deadline = connection_attempt_deadline(&config, started, disconnected_since);
         sleep_before_deadline(config.reconnect_delay, reconnect_deadline);
     }
+}
+
+fn persist_lifecycle_before_shutdown<E: CommandExecutor>(
+    state: &mut DurableState,
+    store: &DurableStateStore,
+    executor: &mut E,
+    lifecycle: &str,
+) -> Result<(), DurableRunnerError> {
+    // A terminal command result is already durable before this boundary. Save
+    // its matching lifecycle before fallible provider cleanup so recovery can
+    // never replay a ready runner after the command itself became terminal.
+    state.lifecycle = lifecycle.to_owned();
+    store.save(state)?;
+    executor.shutdown()
 }
 
 fn poll_executor_events<E: CommandExecutor>(
@@ -593,6 +616,8 @@ mod tests {
         calls: usize,
     }
 
+    struct ShutdownFailingExecutor;
+
     struct RetainingEventExecutor {
         events: VecDeque<PolledEvent>,
         fail_acknowledgement: bool,
@@ -610,6 +635,18 @@ mod tests {
             self.calls += 1;
             Err(DurableRunnerError::invalid(
                 "provider bootstrap rejected authorization=Bearer test-secret",
+            ))
+        }
+    }
+
+    impl CommandExecutor for ShutdownFailingExecutor {
+        fn execute(&mut self, _command: &Command) -> Result<CommandExecution, DurableRunnerError> {
+            Ok(CommandExecution::result(json!({"status": "completed"})))
+        }
+
+        fn shutdown(&mut self) -> Result<(), DurableRunnerError> {
+            Err(DurableRunnerError::invalid(
+                "simulated terminal cleanup failure",
             ))
         }
     }
@@ -674,6 +711,28 @@ mod tests {
             precondition: None,
             payload: json!({}),
         }
+    }
+
+    #[test]
+    fn terminal_lifecycle_is_durable_before_fallible_cleanup() {
+        let directory = std::env::temp_dir().join(format!(
+            "paperclip-runner-terminal-before-cleanup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let config = config(directory.clone());
+        let store = DurableStateStore::new(&directory).unwrap();
+        let (mut state, _) = store.load_or_create(&config).unwrap();
+        let mut executor = ShutdownFailingExecutor;
+
+        let error = persist_lifecycle_before_shutdown(&mut state, &store, &mut executor, "stopped")
+            .expect_err("cleanup failure remains observable");
+        let (recovered, existed) = store.load_or_create(&config).unwrap();
+
+        assert!(error.to_string().contains("terminal cleanup failure"));
+        assert!(existed);
+        assert_eq!(recovered.lifecycle, "stopped");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
