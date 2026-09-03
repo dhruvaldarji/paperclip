@@ -96,8 +96,8 @@ impl AcpxProviderDescriptor {
                 "gpt-5.6-sol",
                 "@agentclientprotocol/codex-acp",
                 "1.6.2",
-                None,
-                None,
+                Some("@openai/codex"),
+                Some("0.148.0"),
                 "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79",
             ),
             "pi" => return Err(DurableRunnerError::invalid(
@@ -1315,21 +1315,26 @@ mod tests {
     }
 
     fn descriptor(agent: &str) -> Value {
-        let (model, package, version, digest) = if agent == "claude" {
-            (
-                "claude-sonnet-5",
-                "@agentclientprotocol/claude-agent-acp",
-                "0.70.0",
-                "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
-            )
-        } else {
-            (
-                "gpt-5.6-sol",
-                "@agentclientprotocol/codex-acp",
-                "1.6.2",
-                "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79",
-            )
-        };
+        let (model, package, version, runtime_package, runtime_version, digest) =
+            if agent == "claude" {
+                (
+                    "claude-sonnet-5",
+                    "@agentclientprotocol/claude-agent-acp",
+                    "0.70.0",
+                    Value::Null,
+                    Value::Null,
+                    "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
+                )
+            } else {
+                (
+                    "gpt-5.6-sol",
+                    "@agentclientprotocol/codex-acp",
+                    "1.6.2",
+                    json!("@openai/codex"),
+                    json!("0.148.0"),
+                    "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79",
+                )
+            };
         json!({
             "kind": "acpx",
             "provider": "acpx",
@@ -1340,8 +1345,8 @@ mod tests {
             "acpxVersion": "0.13.1",
             "agentServerPackage": package,
             "agentServerVersion": version,
-            "agentRuntimePackage": null,
-            "agentRuntimeVersion": null,
+            "agentRuntimePackage": runtime_package,
+            "agentRuntimeVersion": runtime_version,
             "commandDigest": digest,
             "sidecarCommand": "/qualified/node",
             "sidecarArgs": ["/qualified/acpx-sidecar.js"],
