@@ -42,13 +42,13 @@ describe("ACPX recovery identity", () => {
       normalizedSessionId: "session-1",
       permissionMode: "approve-reads",
     });
-    expect(acpxProviderSessionIdentity(record)).toEqual({
+    expect(acpxProviderSessionIdentity(record, fixture.binding)).toEqual({
       kind: "acpx",
       normalizedSessionId: "session-1",
       acpxRecordId: fixture.expected.acpxRecordId,
       backendSessionId: fixture.expected.backendSessionId,
       agentSessionId: fixture.expected.agentSessionId,
-      profileDigest: fixture.binding.profileDigest,
+      profileDigest: fixture.binding.commandDigest,
       workspaceDigest: fixture.binding.workspaceDigest,
       requestedModel: fixture.binding.requestedModel,
       effectiveModel: fixture.binding.effectiveModel,
@@ -140,7 +140,7 @@ describe("ACPX recovery identity", () => {
         {
           ...fixture.expected,
           normalizedSessionId: otherBinding.normalizedSessionId,
-          profileDigest: otherBinding.profileDigest,
+          profileDigest: otherBinding.commandDigest,
           workspaceDigest: otherBinding.workspaceDigest,
         },
         otherBinding,
@@ -176,17 +176,6 @@ describe("ACPX recovery identity", () => {
     expect(() =>
       verifyExpectedAcpxIdentity(fixture.expected, fixture.binding, earlyV1),
     ).toThrow(/persisted runtime record/);
-    expect(() =>
-      verifyExpectedAcpxIdentity(
-        {
-          ...fixture.expected,
-          profileDigest: fixture.input.profile.commandDigest,
-        },
-        fixture.binding,
-        earlyV1,
-      ),
-    ).toThrow(/immutable session configuration/);
-
     const changedBinding = await createAcpxRecoveryBinding({
       ...fixture.input,
       profile: {
@@ -197,11 +186,12 @@ describe("ACPX recovery identity", () => {
     expect(changedBinding.profileDigest).not.toBe(
       fixture.binding.profileDigest,
     );
+    expect(changedBinding.commandDigest).toBe(fixture.binding.commandDigest);
     expect(() =>
       verifyExpectedAcpxIdentity(
         {
           ...fixture.expected,
-          profileDigest: changedBinding.profileDigest,
+          profileDigest: changedBinding.commandDigest,
         },
         changedBinding,
         earlyV1,
@@ -275,7 +265,7 @@ async function recoveryFixture() {
     acpxRecordId: "record-1",
     backendSessionId: "backend-1",
     agentSessionId: "agent-1",
-    profileDigest: binding.profileDigest,
+    profileDigest: binding.commandDigest,
     workspaceDigest: binding.workspaceDigest,
     requestedModel: binding.requestedModel,
     effectiveModel: binding.effectiveModel,

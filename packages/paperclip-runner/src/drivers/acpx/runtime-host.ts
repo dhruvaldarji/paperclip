@@ -458,7 +458,7 @@ export class AcpxRuntimeHost {
         kind: "acpx",
         normalizedSessionId: binding.normalizedSessionId,
         ...runtimeIdentity,
-        profileDigest: binding.profileDigest,
+        profileDigest: binding.commandDigest,
         workspaceDigest: binding.workspaceDigest,
         requestedModel: binding.requestedModel,
         effectiveModel: binding.effectiveModel,
