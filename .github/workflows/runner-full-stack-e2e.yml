@@ -63,18 +63,26 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SELECT_ALL: ${{ inputs.all }}
           SELECT_ID: ${{ inputs.id }}
+          SELECTORS: ${{ format('{0}{1}{2}{3}{4}{5}', inputs.id, inputs.group, inputs.suite, inputs.profile, inputs.environment, inputs.case) }}
         run: |
           set -euo pipefail
           validation_ref="refs/heads/validation/runner-local-integrity-e2e"
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
-            if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ] || [ "${SELECT_ALL:-false}" = true ]; then
-              echo "Non-default refs may run only the pinned scoped repair matrix from the validation branch." >&2
+            if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "Non-default refs may run only the pinned repair matrix from the validation branch." >&2
               exit 1
             fi
-            case "${SELECT_ID:-}" in
-              core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
-              *) echo "Non-default refs may run only one pinned scoped validation cell." >&2; exit 1 ;;
-            esac
+            if [ "${SELECT_ALL:-false}" = true ]; then
+              if [ -n "${SELECTORS:-}" ]; then
+                echo "The full validation matrix cannot be combined with narrower selectors." >&2
+                exit 1
+              fi
+            else
+              case "${SELECT_ID:-}" in
+                core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
+                *) echo "Non-default refs may run only the complete matrix or one pinned scoped validation cell." >&2; exit 1 ;;
+              esac
+            fi
           fi
           if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and floor == .)' <<< "${ALLOWED_ACTOR_IDS:-}" >/dev/null; then
             echo "RUNNER_E2E_ALLOWED_ACTOR_IDS must be a non-empty JSON array of numeric GitHub user IDs." >&2
@@ -317,14 +325,17 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           ALLOWED_ACTOR_IDS: ${{ vars.RUNNER_E2E_ALLOWED_ACTOR_IDS }}
           EXECUTION_ID: ${{ matrix.executionId }}
+          SELECT_ALL: ${{ inputs.all }}
         run: |
           set -euo pipefail
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
             test "$REF" = "refs/heads/validation/runner-local-integrity-e2e"
-            case "$EXECUTION_ID" in
-              core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
-              *) echo "Execution is outside the pinned scoped repair matrix." >&2; exit 1 ;;
-            esac
+            if [ "${SELECT_ALL:-false}" != true ]; then
+              case "$EXECUTION_ID" in
+                core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
+                *) echo "Execution is outside the pinned scoped repair matrix." >&2; exit 1 ;;
+              esac
+            fi
           fi
           jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and floor == .)' <<< "${ALLOWED_ACTOR_IDS:-}" >/dev/null
           triggering_actor_id="$(gh api "users/$TRIGGERING_ACTOR" --jq .id)"
