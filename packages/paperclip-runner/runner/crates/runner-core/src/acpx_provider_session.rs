@@ -701,9 +701,10 @@ impl AcpxProviderSession {
     /// A governed Paperclip result can settle the run while the model is still
     /// waiting for its semantic-tool callback to unwind. In that state the
     /// ordinary sidecar close path may wait for the callback longer than the
-    /// server process that owns this runner. Process-group termination is the
-    /// fail-closed boundary: only after it proves the old generation is gone
-    /// may runnerd persist the durable session as attachable by the next run.
+    /// server process that owns this runner. Process-group termination closes
+    /// this session's transport authority. The caller must additionally
+    /// acquire the identity's inherited lifetime-fence quorum before
+    /// persisting the durable session as attachable.
     pub fn terminate_active_turn_for_suspension(
         &mut self,
         turn_id: &str,

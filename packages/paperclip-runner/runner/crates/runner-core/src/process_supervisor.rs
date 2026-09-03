@@ -820,6 +820,8 @@ impl SupervisedProcess {
         })?;
         // The group leader can exit while descendants remain alive. Reap the
         // leader first, then clear any remaining members of its private group.
+        // A caller that must exclude escaped or re-parented descendants still
+        // needs a separately inherited lifetime fence.
         #[cfg(unix)]
         signal_process_group(self.process_group_id, "KILL");
         self.finished = true;

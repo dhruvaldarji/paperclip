@@ -3,7 +3,7 @@ use std::fs::{self, DirBuilder, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -38,6 +38,8 @@ const ACPX_PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.acpx-provider-state.v
 const MAX_PROVIDER_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PENDING_EVENTS: usize = 8_320;
 const MAX_EVENTS_PER_POLL: usize = 128;
+const PROVIDER_LIFETIME_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5);
+const PROVIDER_LIFETIME_CONFIRMATION_RETRY: Duration = Duration::from_millis(10);
 
 fn initial_event_sequence() -> u64 {
     1
@@ -52,16 +54,16 @@ fn event_sequence(value: &str) -> Option<u64> {
     (event_id(sequence) == value).then_some(sequence)
 }
 
-fn acquire_provider_lifetime_fence(
+fn try_acquire_provider_lifetime_fence(
     candidates: [u16; 3],
-) -> Result<Vec<TcpListener>, DurableRunnerError> {
+) -> Result<Option<Vec<TcpListener>>, DurableRunnerError> {
     let mut listeners = Vec::with_capacity(2);
     for port in candidates {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => {
                 listeners.push(listener);
                 if listeners.len() == 2 {
-                    return Ok(listeners);
+                    return Ok(Some(listeners));
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
@@ -72,9 +74,34 @@ fn acquire_provider_lifetime_fence(
             }
         }
     }
-    Err(DurableRunnerError::invalid(
-        "ACPX original provider lifetime remains active; cleanup is not yet proven",
-    ))
+    Ok(None)
+}
+
+fn acquire_provider_lifetime_fence(
+    candidates: [u16; 3],
+) -> Result<Vec<TcpListener>, DurableRunnerError> {
+    try_acquire_provider_lifetime_fence(candidates)?.ok_or_else(|| {
+        DurableRunnerError::invalid(
+            "ACPX original provider lifetime remains active; cleanup is not yet proven",
+        )
+    })
+}
+
+fn await_provider_lifetime_fence(
+    candidates: [u16; 3],
+) -> Result<Vec<TcpListener>, DurableRunnerError> {
+    let deadline = Instant::now() + PROVIDER_LIFETIME_CONFIRMATION_TIMEOUT;
+    loop {
+        if let Some(listeners) = try_acquire_provider_lifetime_fence(candidates)? {
+            return Ok(listeners);
+        }
+        if Instant::now() >= deadline {
+            return Err(DurableRunnerError::invalid(
+                "ACPX original provider lifetime remains active after suspension; provider exit is not confirmed",
+            ));
+        }
+        std::thread::sleep(PROVIDER_LIFETIME_CONFIRMATION_RETRY);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -956,15 +983,27 @@ impl AcpxCommandExecutor {
                 "reason": reason,
             })));
         };
-        self.session
-            .as_mut()
-            .ok_or_else(|| DurableRunnerError::invalid("ACPX session is unavailable"))?
-            .terminate_active_turn_for_suspension(&turn_id)
-            .map_err(|error| {
-                DurableRunnerError::invalid(format!(
-                    "failed to terminate ACPX turn at the suspension boundary: {error}"
-                ))
-            })?;
+        let provider_lifetime_fence_candidates = {
+            let session = self
+                .session
+                .as_mut()
+                .ok_or_else(|| DurableRunnerError::invalid("ACPX session is unavailable"))?;
+            let candidates = session.identity().provider_lifetime_fence_candidates;
+            session
+                .terminate_active_turn_for_suspension(&turn_id)
+                .map_err(|error| {
+                    DurableRunnerError::invalid(format!(
+                        "failed to terminate ACPX turn at the suspension boundary: {error}"
+                    ))
+                })?;
+            candidates
+        };
+        // Process-group termination reaps the sidecar leader and its ordinary
+        // descendants, but an escaped provider or guardian can outlive that
+        // group. Require the inherited listener quorum before making this
+        // durable session attachable, and retain it through the state write.
+        let _provider_lifetime_fence =
+            await_provider_lifetime_fence(provider_lifetime_fence_candidates)?;
         self.session = None;
         let state = self
             .state
@@ -1877,6 +1916,20 @@ mod tests {
         assert!(!persisted.provider_exit_unconfirmed);
         assert!(!marker.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn suspension_waits_for_the_original_provider_lifetime_quorum() {
+        let (candidates, original_lifetime_fence) = reserve_provider_lifetime_fence();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            drop(original_lifetime_fence);
+        });
+
+        let confirmed = await_provider_lifetime_fence(candidates)
+            .expect("suspension must wait until the original lifetime loses quorum");
+        assert_eq!(confirmed.len(), 2);
+        releaser.join().unwrap();
     }
 
     fn reserve_provider_lifetime_fence() -> ([u16; 3], Vec<TcpListener>) {
