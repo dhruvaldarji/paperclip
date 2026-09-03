@@ -111,6 +111,30 @@ describe("runner E2E catalog", () => {
     expect(plan?.buildPrompt("nonce")).toContain("exactly two numbered steps");
   });
 
+  it("emits native terminal text before invoking the terminal tool", () => {
+    const message = runnerTasks.find((task) => task.id === "message-marker");
+    const ask = runnerTasks.find((task) => task.id === "ask-question");
+    const plan = runnerTasks.find((task) => task.id === "plan-revise-accept");
+    const question = localIntegrityTasks.find(
+      (task) => task.id === "structured-question-resume",
+    );
+
+    for (const prompt of [
+      message?.buildPrompt("nonce"),
+      ask?.buildPrompt("nonce"),
+      plan?.buildPrompt("nonce"),
+      question?.buildPrompt("nonce"),
+    ]) {
+      expect(prompt).toContain("first emit");
+      expect(prompt!.indexOf("first emit")).toBeLessThan(
+        prompt!.indexOf("paperclip_finish exactly once"),
+      );
+      expect(prompt).toContain(
+        "Do not wait for the terminal tool result before emitting the response",
+      );
+    }
+  });
+
   it("uses only declared secret references in generated payloads", () => {
     expect(
       runnerMatrix.every((entry) =>
@@ -213,7 +237,7 @@ describe("runner E2E catalog", () => {
       "do not spell, quote, repeat, announce, or include PAPERCLIP_E2E_PLAN_DONE_nonce",
     );
     expect(task!.buildPrompt("nonce")).toContain(
-      "paperclip_finish with PAPERCLIP_E2E_PLAN_DONE_nonce as its complete summary",
+      'summary:"PAPERCLIP_E2E_PLAN_DONE_nonce"',
     );
     expect(task!.buildPrompt("nonce")).toContain(
       "one atomic issue PATCH with status `done` and that exact comment",
