@@ -1,6 +1,15 @@
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
+@@ -25341,7 +25341,7 @@
+   async handleElicitation(params) {
+     try {
+       const context = this.createMcpElicitationContext(params);
+-      if (this.shouldUseAcpElicitation(params)) {
++      if (!context.isToolApproval && this.shouldUseAcpElicitation(params)) {
+         const response2 = await this.connection.request(
+           methods.client.elicitation.create,
+           this.buildElicitationRequest(params, context),
 @@ -25563,7 +25563,7 @@
              toolCall: {
                toolCallId: context.correlatedCallId,

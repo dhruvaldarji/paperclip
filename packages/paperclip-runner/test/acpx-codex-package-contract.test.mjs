@@ -136,6 +136,13 @@ test("the Codex patch enforces isolated instructions, tools, and skills", () => 
   }
 });
 
+test("the Codex patch keeps MCP tool approvals on the governed permission channel", () => {
+  assert.match(
+    codexPatch,
+    /!context\.isToolApproval && this\.shouldUseAcpElicitation\(params\)/,
+  );
+});
+
 test("the Claude patch removes ambient project and local configuration", () => {
   for (const token of [
     "PAPERCLIP_ACPX_ISOLATED_CONTEXT",
