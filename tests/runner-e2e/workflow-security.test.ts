@@ -3,6 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+const fullStackTestNeeds =
+  /needs:\s*\[\s*authorize,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,\s*build_remote_provider_pack,?\s*\]/u;
 
 describe("public repository paid workflow security", () => {
   it("gates every provider-secret job with stable actor IDs", async () => {
@@ -78,9 +80,7 @@ describe("public repository paid workflow security", () => {
     expect(paidJob).toContain(
       "runs-on: ${{ needs.authorize.outputs.test_runner }}",
     );
-    expect(paidJob).toContain(
-      "needs: [authorize, catalog, daytona_image, build_runner_artifacts, build_remote_provider_pack]",
-    );
+    expect(paidJob).toMatch(fullStackTestNeeds);
     expect(paidJob).toContain("name: runner-e2e-paid");
     expect(paidJob).toMatch(
       /Reauthorize paid execution before provider access[\s\S]*actions\/checkout@[0-9a-f]{40}[\s\S]*persist-credentials: false/,
@@ -197,9 +197,7 @@ describe("public repository paid workflow security", () => {
     expect(workflow).toContain("needs_native_binaries=");
     expect(workflow).toContain("needs_remote_provider_pack=");
 
-    expect(testJob).toContain(
-      "needs: [authorize, catalog, daytona_image, build_runner_artifacts, build_remote_provider_pack]",
-    );
+    expect(testJob).toMatch(fullStackTestNeeds);
     expect(testJob).toContain("Download immutable campaign outputs");
     expect(testJob).toContain("Download immutable remote provider pack");
     expect(testJob).toContain(
