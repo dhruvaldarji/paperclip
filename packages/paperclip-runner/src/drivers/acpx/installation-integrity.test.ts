@@ -69,6 +69,27 @@ describe("ACPX installation integrity", () => {
     expect(createAcpxPackageJsonResolver(root)("qualified-provider")).toBe(
       providerPackageJson,
     );
+
+    const nestedDependencyDirectory = join(
+      providerDirectory,
+      "node_modules",
+      "qualified-dependency",
+    );
+    const nestedDependencyPackageJson = join(
+      nestedDependencyDirectory,
+      "package.json",
+    );
+    await mkdir(nestedDependencyDirectory, { recursive: true });
+    await writeFile(
+      nestedDependencyPackageJson,
+      JSON.stringify({ name: "qualified-dependency", version: "1.0.0" }),
+    );
+    expect(
+      createAcpxPackageJsonResolver(root)(
+        "qualified-dependency",
+        providerPackageJson,
+      ),
+    ).toBe(nestedDependencyPackageJson);
     expect(() =>
       createAcpxPackageJsonResolver("relative/provider-pack"),
     ).toThrow("explicit normalized absolute path");
@@ -107,9 +128,9 @@ describe("ACPX installation integrity", () => {
 
     const outsideManifest = join(parent, "outside-package.json");
     await writeFile(outsideManifest, JSON.stringify({ private: true }));
-    expect(() =>
-      createAcpxPackageJsonResolver(root, outsideManifest),
-    ).toThrow("manifest resolves outside the selected provider root");
+    expect(() => createAcpxPackageJsonResolver(root, outsideManifest)).toThrow(
+      "manifest resolves outside the selected provider root",
+    );
 
     const ancestorProviderDirectory = join(
       parent,
@@ -386,6 +407,146 @@ describe("ACPX installation integrity", () => {
         fixture.runtimePackageJsonPath,
       ),
     });
+  });
+
+  it("pins Claude ACP direct dependencies outside its package root", async () => {
+    const fixture = await installationFixture();
+    const command = [
+      'import { qualifiedValue } from "@anthropic-ai/claude-agent-sdk";',
+      "process.stdout.write(qualifiedValue);",
+    ].join("\n");
+    const dependencyRoot = join(fixture.root, "qualified-dependencies");
+    const dependencyFixtures = [
+      {
+        name: "@agentclientprotocol/sdk",
+        version: "1.3.0",
+        directory: join(dependencyRoot, "agentclient-sdk"),
+      },
+      {
+        name: "@anthropic-ai/claude-agent-sdk",
+        version: "0.3.232",
+        directory: join(dependencyRoot, "claude-agent-sdk"),
+      },
+      {
+        name: "zod",
+        version: "4.4.3",
+        directory: join(dependencyRoot, "zod"),
+      },
+    ] as const;
+    await Promise.all([
+      writeFile(fixture.commandPath, command),
+      mkdir(join(fixture.serverDirectory, "node_modules", "@anthropic-ai"), {
+        recursive: true,
+      }),
+      ...dependencyFixtures.map((dependency) =>
+        mkdir(dependency.directory, { recursive: true }),
+      ),
+    ]);
+    await Promise.all([
+      writeFile(
+        fixture.serverPackageJsonPath,
+        JSON.stringify({
+          name: "@agentclientprotocol/claude-agent-acp",
+          version: "0.70.0",
+          type: "module",
+          bin: "bin/server.js",
+          dependencies: {
+            "@agentclientprotocol/sdk": "1.3.0",
+            "@anthropic-ai/claude-agent-sdk": "0.3.232",
+            zod: "^3.25.0 || ^4.0.0",
+          },
+        }),
+      ),
+      ...dependencyFixtures.map((dependency) =>
+        writeFile(
+          join(dependency.directory, "package.json"),
+          JSON.stringify({
+            name: dependency.name,
+            version: dependency.version,
+            type: "module",
+            exports: "./index.js",
+          }),
+        ),
+      ),
+      writeFile(
+        join(dependencyFixtures[1].directory, "index.js"),
+        'export const qualifiedValue = "qualified-claude-dependency";',
+      ),
+    ]);
+    await symlink(
+      dependencyFixtures[1].directory,
+      join(
+        fixture.serverDirectory,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-agent-sdk",
+      ),
+    );
+    const paths = new Map<string, string>([
+      ["@agentclientprotocol/claude-agent-acp", fixture.serverPackageJsonPath],
+      ...dependencyFixtures.map(
+        (dependency) =>
+          [
+            dependency.name,
+            join(dependency.directory, "package.json"),
+          ] as const,
+      ),
+    ]);
+    const profile = {
+      ...resolveQualifiedAcpxProfile("claude", "claude-sonnet-5"),
+      commandDigest: `sha256:${createHash("sha256").update(command).digest("hex")}`,
+    };
+    const installation = await verifyQualifiedAcpxInstallation(
+      profile,
+      (packageName) => {
+        const resolved = paths.get(packageName);
+        if (!resolved) throw new Error(`unexpected package ${packageName}`);
+        return resolved;
+      },
+    );
+
+    await expectPinnedOutput(
+      (await installation.openCommand()).spawn(),
+      "qualified-claude-dependency",
+    );
+  });
+
+  it("rejects drift in Claude ACP's qualified dependency versions", async () => {
+    const fixture = await installationFixture();
+    await writeFile(
+      fixture.serverPackageJsonPath,
+      JSON.stringify({
+        version: "0.70.0",
+        type: "module",
+        bin: "bin/server.js",
+        dependencies: {
+          "@agentclientprotocol/sdk": "1.3.0",
+          "@anthropic-ai/claude-agent-sdk": "0.3.232",
+          zod: "^3.25.0 || ^4.0.0",
+        },
+      }),
+    );
+    const dependencyPackage = join(fixture.root, "dependency", "package.json");
+    await mkdir(dirname(dependencyPackage), { recursive: true });
+    await writeFile(
+      dependencyPackage,
+      JSON.stringify({ version: "unexpected" }),
+    );
+
+    await expect(
+      verifyQualifiedAcpxInstallation(
+        {
+          ...resolveQualifiedAcpxProfile("claude", "claude-sonnet-5"),
+          commandDigest: fixture.profile.commandDigest,
+        },
+        (packageName) =>
+          packageName === "@agentclientprotocol/claude-agent-acp"
+            ? fixture.serverPackageJsonPath
+            : dependencyPackage,
+      ),
+    ).rejects.toThrow(
+      "ACPX claude dependency package version mismatch for @agentclientprotocol/sdk",
+    );
   });
 
   it.runIf(process.platform === "linux" && process.arch === "x64")(
