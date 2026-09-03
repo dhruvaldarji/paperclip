@@ -1286,14 +1286,15 @@ describe("Codex ACPX runtime adapter", () => {
     const signal = new AbortController().signal;
     const onElicitation = vi.fn();
 
-    expect(
-      port.startTurn({
-        text: "Complete the task.",
-        requestId: "turn-1",
-        signal,
-        onElicitation,
-      }),
-    ).toBe(turn);
+    const admittedTurn = port.startTurn({
+      text: "Complete the task.",
+      requestId: "turn-1",
+      signal,
+      onElicitation,
+    });
+    expect(admittedTurn.requestId).toBe(turn.requestId);
+    await expect(admittedTurn.promptStarted).resolves.toBeUndefined();
+    await expect(admittedTurn.result).resolves.toEqual({ status: "completed" });
     expect(runtime.startTurn).toHaveBeenCalledWith({
       handle: HANDLE,
       text: "Complete the task.",
