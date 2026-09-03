@@ -1026,7 +1026,28 @@ function parseExpectedIdentity(value: unknown): AcpxExpectedSessionIdentity {
     ...(input.permissionMode === undefined
       ? {}
       : { permissionMode: requiredPermissionMode(input.permissionMode) }),
+    providerLifetimeFenceCandidates: requiredFenceCandidates(
+      input.providerLifetimeFenceCandidates,
+    ),
   };
+}
+
+function requiredFenceCandidates(
+  value: unknown,
+): readonly [number, number, number] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    value.some(
+      (port) => !Number.isSafeInteger(port) || port < 49_152 || port > 65_535,
+    ) ||
+    new Set(value).size !== 3
+  ) {
+    throw new Error(
+      "providerLifetimeFenceCandidates must be three distinct private ports",
+    );
+  }
+  return Object.freeze([...value]) as readonly [number, number, number];
 }
 
 function requiredPermissionMode(

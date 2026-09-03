@@ -47,6 +47,7 @@ pub struct AcpxProviderSessionIdentity {
     pub effective_model: String,
     #[serde(default)]
     pub permission_mode: Option<AcpxPermissionMode>,
+    pub provider_lifetime_fence_candidates: [u16; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +186,21 @@ impl AcpxProviderSessionIdentity {
                     "ACPX {label} digest is invalid"
                 )));
             }
+        }
+        if self
+            .provider_lifetime_fence_candidates
+            .iter()
+            .any(|port| *port < 49_152)
+            || self.provider_lifetime_fence_candidates[0]
+                == self.provider_lifetime_fence_candidates[1]
+            || self.provider_lifetime_fence_candidates[0]
+                == self.provider_lifetime_fence_candidates[2]
+            || self.provider_lifetime_fence_candidates[1]
+                == self.provider_lifetime_fence_candidates[2]
+        {
+            return Err(LocalRunnerError::invalid(
+                "ACPX provider lifetime fence candidates are invalid",
+            ));
         }
         Ok(())
     }

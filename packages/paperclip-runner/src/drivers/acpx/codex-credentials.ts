@@ -48,6 +48,7 @@ try {
 
 interface CredentialHomeLock {
   assertHeld(): void;
+  candidatePorts(): readonly [number, number, number];
   inheritanceFds(): readonly [number, number];
   activateLifetimeOwner(pid: number): Promise<void>;
   release(): Promise<void>;
@@ -114,6 +115,8 @@ export type ManagedCodexCredentialMode =
   "api_key" | "inline_json" | "managed_file";
 
 export interface AcpxProviderLifetimeLease {
+  /** Exact kernel quorum candidates used to prove this provider has exited. */
+  readonly lifetimeFenceCandidates: readonly [number, number, number];
   /** Duplicate both quorum listeners into the provider lifetime sentinel. */
   readonly lifetimeFenceFds: readonly [number, number];
   /** Validate the guardian while the provider-lifetime quorum is still held. */
@@ -139,6 +142,7 @@ export async function acquireAcpxProviderLifetimeLease(input: {
   let closeAttempt: Promise<void> | null = null;
   let lifetimeOwnerAttempt: Promise<void> | null = null;
   return Object.freeze({
+    lifetimeFenceCandidates: lock.candidatePorts(),
     lifetimeFenceFds: lock.inheritanceFds(),
     async activateLifetimeOwner(pid: number): Promise<void> {
       if (closed || closeAttempt !== null) {
@@ -363,10 +367,11 @@ async function acquireCredentialHomeLock(
   // contenders cannot both reach quorum; one unrelated occupied listener is
   // tolerated without probing or trusting the process behind it.
   const servers: Server[] = [];
+  const candidatePorts = credentialLeasePorts(home);
   let invalid: Error | null = null;
   let released = false;
   try {
-    for (const port of credentialLeasePorts(home)) {
+    for (const port of candidatePorts) {
       const server = createServer((socket) => socket.destroy());
       try {
         await listenForCredentialLease(server, port);
@@ -431,6 +436,9 @@ async function acquireCredentialHomeLock(
         throw new Error("Managed Codex credential ownership was lost");
       }
     },
+    candidatePorts(): readonly [number, number, number] {
+      return candidatePorts;
+    },
     inheritanceFds(): readonly [number, number] {
       this.assertHeld();
       return inheritanceFds;
@@ -466,7 +474,7 @@ async function acquireCredentialHomeLock(
   });
 }
 
-function credentialLeasePorts(home: string): readonly number[] {
+function credentialLeasePorts(home: string): readonly [number, number, number] {
   const userScope =
     typeof process.getuid === "function" ? String(process.getuid()) : "win32";
   const digest = createHash("sha256")
@@ -477,11 +485,13 @@ function credentialLeasePorts(home: string): readonly number[] {
     .digest();
   const start = digest.readUInt16BE(0) % CREDENTIAL_LEASE_PORT_COUNT;
   const step = (digest.readUInt16BE(2) | 1) % CREDENTIAL_LEASE_PORT_COUNT;
-  return Array.from(
-    { length: CREDENTIAL_LEASE_CANDIDATES },
-    (_, index) =>
-      CREDENTIAL_LEASE_PORT_MIN +
-      ((start + index * step) % CREDENTIAL_LEASE_PORT_COUNT),
+  return Object.freeze(
+    Array.from(
+      { length: CREDENTIAL_LEASE_CANDIDATES },
+      (_, index) =>
+        CREDENTIAL_LEASE_PORT_MIN +
+        ((start + index * step) % CREDENTIAL_LEASE_PORT_COUNT),
+    ) as [number, number, number],
   );
 }
 
@@ -653,6 +663,7 @@ function credentialLease(
   return Object.freeze({
     path,
     mode,
+    lifetimeFenceCandidates: lock.candidatePorts(),
     lifetimeFenceFds: lock.inheritanceFds(),
     async activateLifetimeOwner(pid: number): Promise<void> {
       if (closed || closeAttempt !== null) {

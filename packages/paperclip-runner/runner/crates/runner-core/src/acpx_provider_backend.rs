@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, DirBuilder, File};
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use crate::provider_events::{
 use crate::qualified_launch::verify_launch_artifact;
 
 pub const ACPX_PROVIDER_STATE_FILE: &str = "acpx-provider-state.json";
-const ACPX_PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.acpx-provider-state.v2";
+const ACPX_PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.acpx-provider-state.v3";
 const MAX_PROVIDER_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PENDING_EVENTS: usize = 8_320;
 const MAX_EVENTS_PER_POLL: usize = 128;
@@ -49,6 +50,31 @@ fn event_id(sequence: u64) -> String {
 fn event_sequence(value: &str) -> Option<u64> {
     let sequence = value.strip_prefix("acpx_provider_")?.parse().ok()?;
     (event_id(sequence) == value).then_some(sequence)
+}
+
+fn acquire_provider_lifetime_fence(
+    candidates: [u16; 3],
+) -> Result<Vec<TcpListener>, DurableRunnerError> {
+    let mut listeners = Vec::with_capacity(2);
+    for port in candidates {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                listeners.push(listener);
+                if listeners.len() == 2 {
+                    return Ok(listeners);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => {
+                return Err(DurableRunnerError::invalid(format!(
+                    "failed to prove ACPX provider lifetime cleanup: {error}"
+                )))
+            }
+        }
+    }
+    Err(DurableRunnerError::invalid(
+        "ACPX original provider lifetime remains active; cleanup is not yet proven",
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1164,16 +1190,21 @@ impl CommandExecutor for AcpxCommandExecutor {
             .state
             .as_ref()
             .is_some_and(|state| state.provider_exit_unconfirmed);
-        if self.session.is_none() && provider_exit_unconfirmed {
-            // The prior provider lifetime owns a kernel-backed quorum until its
-            // guardian and process group have exited. Reopening the exact
-            // persistent session can succeed only after that quorum is free;
-            // the replacement then gives this executor a live handle whose
-            // shutdown provides positive cleanup acknowledgement. Never clear
-            // the durable terminal fence based only on the absence of an
-            // in-memory session in this replacement process.
-            self.session = Some(self.start_session(true)?);
-        }
+        // The prior provider, guardian, and sidecar inherit two listeners from
+        // this exact three-port set. A replacement can bind any two only after
+        // the original lifetime has lost quorum. Keep the acquired quorum live
+        // through the durable state update so no successor can race the proof.
+        let _provider_lifetime_fence = if self.session.is_none() && provider_exit_unconfirmed {
+            let candidates = self
+                .state
+                .as_ref()
+                .and_then(|state| state.identity.as_ref())
+                .expect("provider cleanup state has a validated identity")
+                .provider_lifetime_fence_candidates;
+            Some(acquire_provider_lifetime_fence(candidates)?)
+        } else {
+            None
+        };
         if let Some(session) = self.session.as_mut() {
             session
                 .shutdown("runner process shutdown")
@@ -1426,6 +1457,7 @@ mod tests {
             requested_model: "gpt-5.6-sol".to_owned(),
             effective_model: "gpt-5.6-sol".to_owned(),
             permission_mode: Some(AcpxPermissionMode::ApproveReads),
+            provider_lifetime_fence_candidates: [60_001, 60_002, 60_003],
         };
 
         let payload = replacement_continuity_payload(&identity, 41, 42, "turn-2");
@@ -1544,6 +1576,8 @@ mod tests {
         value["runtimeDirectory"] = json!(runtime);
         value["cwd"] = json!(workspace);
         let descriptor: AcpxProviderDescriptor = serde_json::from_value(value).unwrap();
+        let (provider_lifetime_fence_candidates, original_lifetime_fence) =
+            reserve_provider_lifetime_fence();
         let identity = AcpxProviderSessionIdentity {
             kind: "acpx".to_owned(),
             normalized_session_id: "session-1".to_owned(),
@@ -1555,6 +1589,7 @@ mod tests {
             requested_model: descriptor.model.clone(),
             effective_model: descriptor.model.clone(),
             permission_mode: Some(descriptor.permission_mode),
+            provider_lifetime_fence_candidates,
         };
         let operations = Vec::new();
         let tool_set = AuthorizedToolSet {
@@ -1634,16 +1669,45 @@ mod tests {
         assert_eq!(events[1].event_type, "run.terminal");
         let cleanup_error = recovered
             .shutdown()
-            .expect_err("cleanup must not succeed without a verified replacement handle");
+            .expect_err("cleanup must not succeed while the original lifetime remains active");
         assert!(cleanup_error
             .to_string()
-            .contains("failed to start ACPX provider"));
+            .contains("original provider lifetime remains active"));
         let persisted: AcpxDurableState = serde_json::from_slice(
             &fs::read(recovered.state_path()).expect("read retained ACPX state"),
         )
         .expect("parse retained ACPX state");
         assert!(persisted.provider_exit_unconfirmed);
-        assert!(marker.exists());
+        assert!(!marker.exists());
+
+        drop(original_lifetime_fence);
+        recovered.shutdown().unwrap();
+        let persisted: AcpxDurableState = serde_json::from_slice(
+            &fs::read(recovered.state_path()).expect("read cleared ACPX state"),
+        )
+        .expect("parse cleared ACPX state");
+        assert!(!persisted.provider_exit_unconfirmed);
+        assert!(!marker.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn reserve_provider_lifetime_fence() -> ([u16; 3], Vec<TcpListener>) {
+        let mut listeners = Vec::new();
+        for port in 49_152..=u16::MAX {
+            if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+                listeners.push(listener);
+                if listeners.len() == 3 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(listeners.len(), 3, "reserve provider lifetime ports");
+        let candidates = [
+            listeners[0].local_addr().unwrap().port(),
+            listeners[1].local_addr().unwrap().port(),
+            listeners[2].local_addr().unwrap().port(),
+        ];
+        drop(listeners.pop());
+        (candidates, listeners)
     }
 }

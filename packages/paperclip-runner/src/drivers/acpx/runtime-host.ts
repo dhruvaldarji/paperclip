@@ -465,6 +465,8 @@ export class AcpxRuntimeHost {
         requestedModel: binding.requestedModel,
         effectiveModel: binding.effectiveModel,
         permissionMode: binding.permissionMode,
+        providerLifetimeFenceCandidates:
+          admittedLifetime.lifetimeFenceCandidates,
       };
       const identity = createAcpxIdentityRecord(observedIdentity, binding);
       if (options.expectedIdentity) {
