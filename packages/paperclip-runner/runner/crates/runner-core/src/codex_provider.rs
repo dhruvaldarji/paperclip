@@ -1995,7 +1995,7 @@ fn verified_opencode_launch(
     let executable = verify_launch_artifact(&profile.executable, "OpenCode provider executable")
         .map_err(|error| LocalRunnerError::invalid(error.to_string()))?;
     let args = vec![
-        VerifiedProcessArgument::Artifact(proxy),
+        VerifiedProcessArgument::CommonJsArtifact(proxy),
         VerifiedProcessArgument::Literal(TRUSTED_OPENCODE_EXECUTABLE_ARG.to_owned()),
         VerifiedProcessArgument::ExecutableArtifact(executable),
     ];
@@ -2746,7 +2746,7 @@ mod tests {
         let launch = verified_opencode_launch(&profile).unwrap();
         assert!(matches!(
             launch.arguments().first(),
-            Some(VerifiedProcessArgument::Artifact(_))
+            Some(VerifiedProcessArgument::CommonJsArtifact(_))
         ));
         assert!(matches!(
             launch.arguments().get(1),

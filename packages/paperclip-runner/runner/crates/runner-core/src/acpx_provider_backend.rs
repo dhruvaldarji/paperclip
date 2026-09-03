@@ -213,7 +213,8 @@ impl AcpxProviderDescriptor {
         let verified_args = launch_profile
             .args
             .iter()
-            .map(|argument| {
+            .enumerate()
+            .map(|(index, argument)| {
                 let path = Path::new(argument);
                 if !path.is_absolute() {
                     return Ok(VerifiedProcessArgument::Literal(argument.clone()));
@@ -221,7 +222,13 @@ impl AcpxProviderDescriptor {
                 verified
                     .get(path)
                     .cloned()
-                    .map(VerifiedProcessArgument::Artifact)
+                    .map(|artifact| {
+                        if index == 0 {
+                            VerifiedProcessArgument::CommonJsArtifact(artifact)
+                        } else {
+                            VerifiedProcessArgument::Artifact(artifact)
+                        }
+                    })
                     .ok_or_else(|| {
                         DurableRunnerError::invalid(
                             "ACPX runner launch profile does not authenticate an absolute argument",
@@ -1419,7 +1426,7 @@ mod tests {
         let verified_launch = transport.verified_launch.as_ref().unwrap();
         assert!(matches!(
             verified_launch.arguments().first(),
-            Some(VerifiedProcessArgument::Artifact(_))
+            Some(VerifiedProcessArgument::CommonJsArtifact(_))
         ));
 
         let mut drifted_path = descriptor.clone();
