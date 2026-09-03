@@ -95,7 +95,7 @@ jobs:
           AWS_PAID_RUNNER_ENABLED: ${{ vars.RUNNER_E2E_AWS_ENABLED }}
         run: |
           set -euo pipefail
-          github_runner='ubuntu-latest-m'
+          github_runner='ubuntu-latest'
           aws_runner='runs-on/fleet=paperclip-public-pr-x64/env=public-ci'
 
           if [ "$AWS_PAID_RUNNER_ENABLED" = true ]; then
@@ -111,7 +111,7 @@ jobs:
               echo "max_parallel_default=32"
               echo "max_parallel_limit=57"
             } >> "$GITHUB_OUTPUT"
-            echo '::notice title=Paid runner routing::RUNNER_E2E_AWS_ENABLED is not true; using the existing paid runner'
+            echo '::notice title=Paid runner routing::RUNNER_E2E_AWS_ENABLED is not true; using the proven GitHub-hosted runner'
           fi
 
   catalog:

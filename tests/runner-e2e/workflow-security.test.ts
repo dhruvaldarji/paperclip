@@ -71,7 +71,7 @@ describe("public repository paid workflow security", () => {
     expect(authorizeJob).toContain(
       "aws_runner='runs-on/fleet=paperclip-public-pr-x64/env=public-ci'",
     );
-    expect(authorizeJob).toContain("github_runner='ubuntu-latest-m'");
+    expect(authorizeJob).toContain("github_runner='ubuntu-latest'");
     expect(authorizeJob).toContain(
       "AWS_PAID_RUNNER_ENABLED: ${{ vars.RUNNER_E2E_AWS_ENABLED }}",
     );

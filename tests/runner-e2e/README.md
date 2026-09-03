@@ -288,8 +288,8 @@ by the repository variable `RUNNER_FULL_STACK_E2E_NIGHTLY_ENABLED=true`. Set it
 only after the live acceptance ladder in the architecture plan is green.
 Set `RUNNER_E2E_AWS_ENABLED=true` to route paid cells to the repository-scoped
 ephemeral AWS RunsOn fleet selected by
-`runs-on/fleet=paperclip-public-pr-x64/env=public-ci`. Any other value retains
-the existing `ubuntu-latest-m` target. Set `RUNNER_E2E_MAX_PARALLEL` to an
+`runs-on/fleet=paperclip-public-pr-x64/env=public-ci`. Any other value uses the
+proven GitHub-hosted `ubuntu-latest` target. Set `RUNNER_E2E_MAX_PARALLEL` to an
 integer from 1–100 on AWS (default 100); use at least 71 to run the current
 complete catalog in one wave. The fallback runner retains its 1–57 limit and
 default of 32. Multi-turn steps are sequential inside their cell while
