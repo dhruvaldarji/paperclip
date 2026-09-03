@@ -340,10 +340,9 @@ function providerDrainStateFromSnapshot(state: Record<string, unknown>): {
     ? state.queuedEvents.length
     : 0;
   const activeProviderTurnId =
-    typeof state.activeProviderTurnId === "string" &&
-    state.activeProviderTurnId.length > 0
-      ? state.activeProviderTurnId
-      : null;
+    [state.activeProviderTurnId, state.activeTurnId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    ) ?? null;
   return {
     pendingEventCount: pending + queued,
     activeProviderTurnId,

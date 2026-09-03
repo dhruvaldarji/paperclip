@@ -106,6 +106,17 @@ it("identifies an active provider turn that must stop before suspension", () => 
 
   expect(
     runnerdRecoveryInternals.providerDrainStateFromSnapshot({
+      activeTurnId: "acpx-turn-1",
+      pendingEvents: [],
+    }),
+  ).toEqual({
+    pendingEventCount: 0,
+    activeProviderTurnId: "acpx-turn-1",
+    providerSettled: false,
+  });
+
+  expect(
+    runnerdRecoveryInternals.providerDrainStateFromSnapshot({
       activeProviderTurnId: null,
       ambiguousTurnStartPending: false,
       pendingEvents: [],
