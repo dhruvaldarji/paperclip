@@ -669,7 +669,7 @@ jobs:
 
   report:
     name: Merge and enforce campaign result
-    if: always() && needs.catalog.result == 'success'
+    if: always() && !cancelled() && needs.catalog.result == 'success'
     needs: [catalog, daytona_image, test]
     outputs:
       history_source_ready: ${{ steps.history_source_ready.outputs.ready }}

@@ -93,6 +93,9 @@ describe("public repository paid workflow security", () => {
     expect(fullStack).toContain(
       "cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}",
     );
+    expect(fullStack).toContain(
+      "if: always() && !cancelled() && needs.catalog.result == 'success'",
+    );
     for (const [secret, condition] of Object.entries({
       OPENAI_API_KEY: "matrix.credentialName == 'OPENAI_API_KEY'",
       ANTHROPIC_API_KEY: "matrix.credentialName == 'ANTHROPIC_API_KEY'",
