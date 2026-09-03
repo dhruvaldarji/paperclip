@@ -726,6 +726,7 @@ export async function verifyQualifiedAcpxInstallation(
           serverPackageFormat,
           dependencyAncestorFormats,
           currentRuntimeExecutable,
+          runtimeExecutable?.environmentVariable ?? null,
         );
       } catch (error) {
         await Promise.all([
@@ -1233,6 +1234,8 @@ function commandLease(
   serverPackageFormat: AcpxCommandFormat,
   dependencyAncestorFormats: readonly AcpxCommandFormat[],
   providerRuntimeExecutable: FileHandle | null,
+  providerRuntimeEnvironmentVariable:
+    VerifiedAcpxRuntimeExecutable["environmentVariable"] | null,
 ): VerifiedAcpxCommandLease {
   let consumed = false;
   let directoriesReleased = false;
@@ -1298,11 +1301,17 @@ function commandLease(
         const runtimeExecutable = verifiedRuntimeExecutable();
         const environment = sanitizedNodeEnvironment(options.env);
         environment[VERIFIED_RUNTIME_EXECUTABLE_ENV] = runtimeExecutable;
-        if (providerRuntimeExecutable === null) {
+        if (
+          (providerRuntimeExecutable === null) !==
+          (providerRuntimeEnvironmentVariable === null)
+        ) {
+          throw new Error("ACPX provider runtime executable lease is invalid");
+        }
+        if (providerRuntimeEnvironmentVariable === null) {
           delete environment[VERIFIED_PROVIDER_RUNTIME_TARGET_ENV];
         } else {
           environment[VERIFIED_PROVIDER_RUNTIME_TARGET_ENV] =
-            providerRuntimeExecutable.environmentVariable;
+            providerRuntimeEnvironmentVariable;
         }
         child = spawnChildProcess(
           runtimeExecutable,
