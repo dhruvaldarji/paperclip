@@ -623,6 +623,12 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "ACPX_SESSION_ENSURE_TYPE_ERROR" => return "session_ensure_type_error",
         "ACPX_SESSION_ENSURE_NON_ERROR" => return "session_ensure_non_error",
         "ACP_SESSION_INIT_FAILED" => return "acp_session_init_failed",
+        "NO_SESSION" => return "acpx_no_session",
+        "TIMEOUT" => return "acpx_timeout",
+        "PERMISSION_DENIED" => return "acpx_permission_denied",
+        "PERMISSION_PROMPT_UNAVAILABLE" => return "acpx_permission_prompt_unavailable",
+        "RUNTIME" => return "acpx_runtime_failure",
+        "USAGE" => return "acpx_usage_failure",
         "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT" => {
             return "runtime_admission_verification_timeout"
         }
@@ -739,6 +745,15 @@ mod tests {
             ),
             ("ACPX_SESSION_ENSURE_NON_ERROR", "session_ensure_non_error"),
             ("ACP_SESSION_INIT_FAILED", "acp_session_init_failed"),
+            ("NO_SESSION", "acpx_no_session"),
+            ("TIMEOUT", "acpx_timeout"),
+            ("PERMISSION_DENIED", "acpx_permission_denied"),
+            (
+                "PERMISSION_PROMPT_UNAVAILABLE",
+                "acpx_permission_prompt_unavailable",
+            ),
+            ("RUNTIME", "acpx_runtime_failure"),
+            ("USAGE", "acpx_usage_failure"),
             (
                 "ACPX_SIDECAR_STATUS_READ_TIMEOUT",
                 "session_status_read_timeout",

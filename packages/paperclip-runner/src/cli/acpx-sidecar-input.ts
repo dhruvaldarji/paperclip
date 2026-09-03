@@ -57,12 +57,18 @@ export function acpxSidecarErrorCode(error: Error): string {
 
 function directAcpxSidecarErrorCode(error: Error): string | null {
   const details = error as Error & Record<string, unknown>;
+  const outputCode = typeof details.code === "string" ? details.code : null;
+  const detailCode =
+    typeof details.detailCode === "string" ? details.detailCode : null;
+  // ACPX output errors may carry both a broad presentation code (for example,
+  // RUNTIME) and the stable operational identity that produced it. Preserve
+  // the latter across the sidecar boundary; otherwise a provider bootstrap
+  // failure is reduced to an unclassified generic runtime rejection.
   const code =
-    typeof details.code === "string"
-      ? details.code
-      : typeof details.detailCode === "string"
-        ? details.detailCode
-        : null;
+    detailCode !== null &&
+    (outputCode === null || GENERIC_ACPX_OUTPUT_CODES.has(outputCode))
+      ? detailCode
+      : (outputCode ?? detailCode);
   if (code === null) {
     return error.name === "AcpxSessionHandshakeTimeoutError" ||
       error.message === "ACPX session handshake exceeded its admission deadline"
@@ -104,3 +110,12 @@ function directAcpxSidecarErrorCode(error: Error): string | null {
   }
   return "AGENT_STARTUP_FAILED.OTHER";
 }
+
+const GENERIC_ACPX_OUTPUT_CODES = new Set([
+  "NO_SESSION",
+  "TIMEOUT",
+  "PERMISSION_DENIED",
+  "PERMISSION_PROMPT_UNAVAILABLE",
+  "RUNTIME",
+  "USAGE",
+]);

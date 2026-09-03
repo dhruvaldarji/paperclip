@@ -130,6 +130,12 @@ describe("ACPX sidecar input sequencing", () => {
       code: "ACP_MODEL_UNSUPPORTED",
       detailCode: "AGENT_STARTUP_FAILED",
     });
+    const genericStartup = Object.assign(new Error("provider exited"), {
+      code: "RUNTIME",
+      detailCode: "AGENT_STARTUP_FAILED",
+      stderrSummary: "Error [ERR_MODULE_NOT_FOUND]: package was not found",
+      exitCode: 1,
+    });
     const nestedHandshake = new AggregateError(
       [
         Object.assign(new Error("admission deadline"), {
@@ -149,6 +155,9 @@ describe("ACPX sidecar input sequencing", () => {
       "violet-circuit-4821",
     );
     expect(acpxSidecarErrorCode(model)).toBe("ACP_MODEL_UNSUPPORTED");
+    expect(acpxSidecarErrorCode(genericStartup)).toBe(
+      "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
+    );
     expect(acpxSidecarErrorCode(nestedHandshake)).toBe(
       "ACPX_SESSION_HANDSHAKE_TIMEOUT",
     );
