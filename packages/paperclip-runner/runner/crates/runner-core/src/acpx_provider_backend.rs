@@ -1149,6 +1149,11 @@ impl CommandExecutor for AcpxCommandExecutor {
     }
 
     fn shutdown(&mut self) -> Result<(), DurableRunnerError> {
+        // A replacement durable runner may reach terminal reconciliation
+        // before any provider command or event poll. Restore the persisted
+        // session first so cleanup cannot succeed merely because this process
+        // has no in-memory session yet.
+        self.restore()?;
         if let Some(session) = self.session.as_mut() {
             session
                 .shutdown("runner process shutdown")
