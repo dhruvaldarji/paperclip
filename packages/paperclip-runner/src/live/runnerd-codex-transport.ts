@@ -3013,7 +3013,22 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#flushPendingTraceRehydrations();
     const events = this.#core?.store.state.committedEvents ?? [];
     while (this.#eventIndex < events.length) {
-      const event = events[this.#eventIndex++];
+      const event = events[this.#eventIndex]!;
+      const eventPayload = record(event.envelope.payload).payload;
+      const terminalWhileTurnStartPending =
+        this.#turnStartResponsePending &&
+        ([
+          "turn.completed",
+          "turn.failed",
+          "turn.interrupted",
+          "turn.cancelled",
+        ].includes(event.eventType) ||
+          (event.eventType === "provider.event" &&
+            unwrapRunnerdProviderNotifications(eventPayload).some(
+              (notification) => notification.method === "turn/completed",
+            )));
+      if (terminalWhileTurnStartPending) return;
+      this.#eventIndex += 1;
       if (
         event.eventType === "harness.ready" ||
         event.eventType === "session.started" ||
@@ -3141,7 +3156,6 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           this.#bridgedRuntimeInputs.delete(requestId);
         continue;
       }
-      const eventPayload = record(event.envelope.payload).payload;
       const sessionUpdatePayload = record(eventPayload);
       const canonicalMethod = (
         {

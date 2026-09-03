@@ -282,9 +282,7 @@ describe("ACPX runtime host", () => {
     expect(lifetimeFenceCandidates).toHaveLength(3);
     expect(new Set(lifetimeFenceCandidates).size).toBe(3);
     expect(
-      lifetimeFenceCandidates.every(
-        (port) => port >= 49_152 && port <= 65_535,
-      ),
+      lifetimeFenceCandidates.every((port) => port >= 49_152 && port <= 65_535),
     ).toBe(true);
     expect(capturedEnvironment.OPENAI_API_KEY).toBe("launch-secret");
     expect(host.persistedEnvironment().OPENAI_API_KEY).toBeUndefined();
@@ -1255,13 +1253,15 @@ describe("ACPX runtime host", () => {
     });
     // File removal precedes kernel lease release. Wait for the lease itself so
     // this assertion cannot race between those two ordered cleanup steps.
-    const contender = await vi.waitFor(() =>
-      stageManagedCodexCredential({
-        agentHomeDirectory: credentialHome,
-        environment: {
-          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
-        },
-      }),
+    const contender = await vi.waitFor(
+      () =>
+        stageManagedCodexCredential({
+          agentHomeDirectory: credentialHome,
+          environment: {
+            PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"owner":"contender"}',
+          },
+        }),
+      { timeout: 5_000 },
     );
     await contender.close();
   });
