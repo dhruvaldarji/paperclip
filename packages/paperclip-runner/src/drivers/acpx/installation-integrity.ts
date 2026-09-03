@@ -50,6 +50,28 @@ const QUALIFIED_CODEX_LINUX_X64_RUNTIME = Object.freeze({
     "sha256:ac2cfed85fb647d61e0150b8548102b330e4799d9d81ad5d354de701edf6b074",
 });
 
+// Claude's ACP server is not a self-contained bundle: its entrypoint imports
+// these three packages directly from pnpm's real store paths. Keep that exact
+// package graph version-bound and descriptor-pinned instead of granting the
+// provider ambient access to the workspace's complete node_modules ancestry.
+const QUALIFIED_CLAUDE_PROVIDER_DEPENDENCIES = Object.freeze([
+  Object.freeze({
+    packageName: "@agentclientprotocol/sdk",
+    packageVersion: "1.3.0",
+    dependencyDeclaration: "1.3.0",
+  }),
+  Object.freeze({
+    packageName: "@anthropic-ai/claude-agent-sdk",
+    packageVersion: "0.3.232",
+    dependencyDeclaration: "0.3.232",
+  }),
+  Object.freeze({
+    packageName: "zod",
+    packageVersion: "4.4.3",
+    dependencyDeclaration: "^3.25.0 || ^4.0.0",
+  }),
+]);
+
 const PROVIDER_LIFETIME_WATCHDOG_SOURCE = `
 const fs = require("node:fs");
 let reaped = false;
@@ -214,7 +236,10 @@ try {
 const providerGuardianOwnership = new WeakMap<ChildProcess, Promise<void>>();
 const providerExitProof = new WeakMap<ChildProcess, Promise<void>>();
 
-export type AcpxPackageJsonResolver = (packageName: string) => string;
+export type AcpxPackageJsonResolver = (
+  packageName: string,
+  issuerPackageJsonPath?: string,
+) => string;
 
 export function createAcpxPackageJsonResolver(
   providerPackageRoot: string | undefined,
@@ -259,10 +284,18 @@ export function createAcpxPackageJsonResolver(
       "ACPX provider node_modules resolves outside the selected provider root",
     );
   }
-  const providerRequire = createRequire(canonicalManifest);
-  return (packageName) => {
+  return (packageName, issuerPackageJsonPath) => {
+    const canonicalIssuer =
+      issuerPackageJsonPath === undefined
+        ? canonicalManifest
+        : realpathSync(issuerPackageJsonPath);
+    if (!pathIsInside(canonicalRoot, canonicalIssuer)) {
+      throw new Error(
+        `ACPX provider package issuer for ${packageName} resolves outside the selected provider root`,
+      );
+    }
     const packageJsonPath = realpathSync(
-      providerRequire.resolve(`${packageName}/package.json`),
+      createRequire(canonicalIssuer).resolve(`${packageName}/package.json`),
     );
     if (!pathIsInside(canonicalNodeModules, packageJsonPath)) {
       throw new Error(
@@ -380,6 +413,7 @@ interface AcpxPackageMetadata {
   version?: string;
   bin?: unknown;
   type?: unknown;
+  dependencies?: unknown;
   optionalDependencies?: unknown;
 }
 
@@ -480,6 +514,48 @@ export async function verifyQualifiedAcpxInstallation(
     throw new Error("Qualified ACPX runtime version omitted its package");
   }
 
+  const supplementalPackages: Array<{
+    directory: string;
+    format: AcpxCommandFormat;
+  }> = [];
+  if (profile.agent === "claude") {
+    const declaredDependencies = serverPackage.dependencies;
+    if (
+      typeof declaredDependencies !== "object" ||
+      declaredDependencies === null ||
+      Array.isArray(declaredDependencies)
+    ) {
+      throw new Error("ACPX claude package omitted its qualified dependencies");
+    }
+    for (const expected of QUALIFIED_CLAUDE_PROVIDER_DEPENDENCIES) {
+      if (
+        (declaredDependencies as Record<string, unknown>)[
+          expected.packageName
+        ] !== expected.dependencyDeclaration
+      ) {
+        throw new Error(
+          `ACPX claude package dependency mismatch for ${expected.packageName}`,
+        );
+      }
+      const dependencyPackageJsonPath = await realpath(
+        resolvePackageJson(expected.packageName, serverPackageJsonPath),
+      );
+      const dependencyPackage = await readPackageJson(
+        dependencyPackageJsonPath,
+        expected.packageName,
+      );
+      if (dependencyPackage.version !== expected.packageVersion) {
+        throw new Error(
+          `ACPX claude dependency package version mismatch for ${expected.packageName}: expected ${expected.packageVersion}, received ${dependencyPackage.version ?? "unknown"}`,
+        );
+      }
+      supplementalPackages.push({
+        directory: dirname(dependencyPackageJsonPath),
+        format: packageModuleFormat(dependencyPackage.type),
+      });
+    }
+  }
+
   const serverDependencyAncestors = await inspectDependencyAncestors(
     commandDirectory,
     packageDirectory,
@@ -508,6 +584,22 @@ export async function verifyQualifiedAcpxInstallation(
         ),
       );
       dependencyAncestorFormats.push(runtimePackageFormat ?? "commonjs");
+    }
+  }
+  for (const supplemental of supplementalPackages) {
+    if (
+      supplemental.directory !== commandDirectory &&
+      !dependencyAncestors.some(
+        (ancestor) => ancestor.path === supplemental.directory,
+      )
+    ) {
+      dependencyAncestors.push(
+        await inspectExplicitDependencyRoot(
+          supplemental.directory,
+          `${profile.agent} dependency`,
+        ),
+      );
+      dependencyAncestorFormats.push(supplemental.format);
     }
   }
   if (dependencyAncestors.length > MAX_DEPENDENCY_ANCESTORS) {
@@ -593,17 +685,22 @@ export async function verifyQualifiedAcpxInstallation(
   });
 }
 
-function defaultPackageJsonResolver(packageName: string): string {
+function defaultPackageJsonResolver(
+  packageName: string,
+  issuerPackageJsonPath?: string,
+): string {
   const providerPackageRoot = process.env.PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT;
   if (providerPackageRoot !== undefined) {
     return createAcpxPackageJsonResolver(
       providerPackageRoot,
       process.env.PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST,
-    )(packageName);
+    )(packageName, issuerPackageJsonPath);
   }
   // Source-mode and direct runtimes still have a stable module URL. The
   // descriptor-backed runner sidecar always receives the explicit root above.
-  return createRequire(import.meta.url).resolve(`${packageName}/package.json`);
+  return createRequire(issuerPackageJsonPath ?? import.meta.url).resolve(
+    `${packageName}/package.json`,
+  );
 }
 
 async function readPackageJson(
