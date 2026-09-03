@@ -1,7 +1,8 @@
+import { promises as fsPromises } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertManagedCredentialHome,
   assertNoSymlinkInManagedCredentialPath,
@@ -247,5 +248,105 @@ describe("assertManagedCredentialHome", () => {
       "outside the company-managed directory tree",
     );
     expect(await readdir(externalTarget)).toEqual([]);
+  });
+});
+
+// On a case-insensitive filesystem (the default on macOS and Windows),
+// `fs.realpath` can return the on-disk spelling of a directory whose
+// configured casing (from `PAPERCLIP_HOME`) differs only by letter case. This
+// suite forces `process.platform` to a non-Linux value and stubs `realpath`
+// to reproduce that exact scenario against a real temp directory tree — the
+// test filesystem itself is case-sensitive, so a genuine case-insensitive
+// `realpath` behavior has to be simulated — to prove a same-location casing
+// difference no longer rejects a valid managed home, while containment and
+// symlink rejection still hold.
+describe("assertManagedCredentialHome on a case-insensitive filesystem", () => {
+  const cleanupDirs: string[] = [];
+  const originalPlatform = process.platform;
+
+  afterEach(async () => {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    vi.restoreAllMocks();
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  it("accepts a managed home when PAPERCLIP_HOME's casing differs from fs.realpath's on-disk spelling", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+
+    const realHomeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-managed-credential-home-casing-"));
+    cleanupDirs.push(realHomeDir);
+    const companyId = "company-a";
+    const companyRoot = path.join(realHomeDir, "instances", "default", "companies", companyId);
+    await mkdir(companyRoot, { recursive: true });
+    const candidateDir = path.join(companyRoot, "codex-home");
+    await mkdir(candidateDir, { recursive: true });
+
+    // `PAPERCLIP_HOME` is configured with different letter casing than the
+    // directory actually created above (same length, same characters, only
+    // upper-cased). Stub `fs.realpath` so every path under the
+    // differently-cased `configuredHomeDir` resolves to its real, on-disk
+    // -cased counterpart under `realHomeDir` — reproducing what a genuine
+    // case-insensitive filesystem's `fs.realpath` returns, without needing
+    // one for this test run.
+    const configuredHomeDir = realHomeDir.toUpperCase();
+    const realRealpath = fsPromises.realpath.bind(fsPromises);
+    vi.spyOn(fsPromises, "realpath").mockImplementation(async (input, ...rest) => {
+      if (typeof input === "string" && input.startsWith(configuredHomeDir)) {
+        return realRealpath(realHomeDir + input.slice(configuredHomeDir.length), ...(rest as []));
+      }
+      return realRealpath(input, ...(rest as []));
+    });
+
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: configuredHomeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const configuredCandidateDir = path.join(
+      configuredHomeDir,
+      "instances",
+      "default",
+      "companies",
+      companyId,
+      "codex-home",
+    );
+
+    const resolved = await assertManagedCredentialHome({ env, companyId, candidateDir: configuredCandidateDir });
+
+    expect(resolved).toBe(candidateDir);
+  });
+
+  async function setUpNonLinuxInstance() {
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-managed-credential-home-nonlinux-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const companyId = "company-a";
+    const companyRoot = path.join(homeDir, "instances", "default", "companies", companyId);
+    await mkdir(companyRoot, { recursive: true });
+    return { env, companyId, companyRoot };
+  }
+
+  it("still rejects a genuine redirect to a different location, not just a casing difference", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const { env, companyId } = await setUpNonLinuxInstance();
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-outside-nonlinux-"));
+    cleanupDirs.push(outsideDir);
+
+    await expect(
+      assertManagedCredentialHome({ env, companyId, candidateDir: outsideDir }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
+  it("still rejects a symbolic link on a non-Linux platform", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const { env, companyId, companyRoot } = await setUpNonLinuxInstance();
+    const outsideTarget = await mkdtemp(path.join(os.tmpdir(), "paperclip-symlink-target-nonlinux-"));
+    cleanupDirs.push(outsideTarget);
+    const linkPath = path.join(companyRoot, "codex-home");
+    await symlink(outsideTarget, linkPath, "dir");
+
+    await expect(
+      assertManagedCredentialHome({ env, companyId, candidateDir: linkPath }),
+    ).rejects.toThrow("outside the company-managed directory tree");
   });
 });

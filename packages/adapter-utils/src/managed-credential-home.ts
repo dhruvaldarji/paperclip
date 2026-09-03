@@ -34,6 +34,28 @@ function rejectCredentialHome(): never {
   throw new ManagedCredentialHomeRejectedError();
 }
 
+/**
+ * True when `realPath` (the output of `fs.realpath`) matches `literalPath`
+ * (the same path built from configuration, not yet resolved) closely enough
+ * to trust as the SAME location, not a redirect to a different one.
+ *
+ * An exact match always passes. On a case-insensitive filesystem — the
+ * default on macOS and Windows — `fs.realpath` can return the on-disk
+ * spelling of a directory whose configured casing differs only by letter
+ * case; two strings that differ only by letter case address the same file on
+ * that filesystem, so tolerate that difference there. Linux is excluded: its
+ * default filesystems are case-sensitive, so two differently-cased strings
+ * there name two different directories, and a symbolic link could redirect
+ * one to the other. Restricting the tolerance to non-Linux platforms keeps a
+ * genuine redirect on Linux caught, while a same-location casing difference
+ * on macOS or Windows no longer rejects a valid managed home.
+ */
+function realPathMatchesLiteral(realPath: string, literalPath: string): boolean {
+  if (realPath === literalPath) return true;
+  if (process.platform === "linux") return false;
+  return realPath.toLowerCase() === literalPath.toLowerCase();
+}
+
 /** True when `segment` is exactly one path component: not empty, not `.` or `..`, and free of a path separator. */
 function isSafePathSegment(segment: string): boolean {
   if (!segment) return false;
@@ -101,7 +123,10 @@ async function resolveRealPathAllowingMissingSegments(candidateDir: string): Pro
  *   being silently adopted as the credential-write boundary. A redirected
  *   ancestor moves BOTH the instance root and the `companies` directory
  *   through the same target, so the `companies`-only check below cannot
- *   catch it on its own; this check must run first.
+ *   catch it on its own; this check must run first. A same-location
+ *   difference of letter case only, the kind a case-insensitive filesystem's
+ *   `fs.realpath` can return on macOS or Windows, is not a redirect and does
+ *   not reject — see {@link realPathMatchesLiteral}.
  * - the `companies` directory does not exist.
  * - the `companies` directory is a symbolic link, or sits anywhere other
  *   than `<realInstanceRoot>/companies` once resolved — this stops a
@@ -135,10 +160,12 @@ export async function resolveManagedCredentialHomeBoundary(
   // `realInstanceRoot` to an external location. The `companies`-root check
   // below re-derives its expected value from `realInstanceRoot`, so it
   // resolves through the SAME redirect on both sides and cannot detect this
-  // on its own. Require the resolved instance root to equal the literal,
-  // unresolved `instanceRoot`; a difference means some ancestor component is
-  // a symbolic link, so reject before it can be adopted as the boundary.
-  if (realInstanceRoot !== instanceRoot) {
+  // on its own. Require the resolved instance root to match the literal,
+  // unresolved `instanceRoot` (tolerating a letter-case-only difference on a
+  // non-Linux platform — see {@link realPathMatchesLiteral}); anything else
+  // means some ancestor component is a symbolic link, so reject before it
+  // can be adopted as the boundary.
+  if (!realPathMatchesLiteral(realInstanceRoot, instanceRoot)) {
     rejectCredentialHome();
   }
 
@@ -152,11 +179,12 @@ export async function resolveManagedCredentialHomeBoundary(
 
   // A symbolic link at (or above) the `companies` segment can redirect
   // `realCompaniesRoot` to any external location `fs.realpath` is willing to
-  // follow. Require it to land exactly at `<realInstanceRoot>/companies` —
-  // the only location a managed `companies` directory may occupy — so a
-  // redirected companies root is rejected instead of silently adopted as the
-  // credential-write boundary.
-  if (realCompaniesRoot !== path.join(realInstanceRoot, "companies")) {
+  // follow. Require it to land at `<realInstanceRoot>/companies` — the only
+  // location a managed `companies` directory may occupy, tolerating a
+  // letter-case-only difference on a non-Linux platform the same way as the
+  // instance-root check above — so a redirected companies root is rejected
+  // instead of silently adopted as the credential-write boundary.
+  if (!realPathMatchesLiteral(realCompaniesRoot, path.join(realInstanceRoot, "companies"))) {
     rejectCredentialHome();
   }
 
