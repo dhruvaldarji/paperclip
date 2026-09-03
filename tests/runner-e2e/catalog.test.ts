@@ -113,7 +113,7 @@ describe("runner E2E catalog", () => {
     expect(plan?.buildPrompt("nonce")).toContain("exactly two numbered steps");
   });
 
-  it("emits native terminal text before invoking the terminal tool", () => {
+  it("emits native terminal text after the terminal tool succeeds", () => {
     const message = runnerTasks.find((task) => task.id === "message-marker");
     const ask = runnerTasks.find((task) => task.id === "ask-question");
     const plan = runnerTasks.find((task) => task.id === "plan-revise-accept");
@@ -131,13 +131,11 @@ describe("runner E2E catalog", () => {
       question?.buildPrompt("nonce"),
       ...breadthTasks,
     ]) {
-      expect(prompt).toContain("first emit");
-      expect(prompt!.indexOf("first emit")).toBeLessThan(
-        prompt!.indexOf("paperclip_finish exactly once"),
+      expect(prompt).toContain("then emit exactly");
+      expect(prompt!.indexOf("paperclip_finish exactly once")).toBeLessThan(
+        prompt!.indexOf("then emit exactly"),
       );
-      expect(prompt).toContain(
-        "Do not wait for the terminal tool result before emitting the response",
-      );
+      expect(prompt).toContain("Wait for that tool call to succeed");
     }
 
     for (const taskId of [
