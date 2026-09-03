@@ -1092,3 +1092,99 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
     expect(await readdir(hostDir)).toEqual([]);
   });
 });
+
+// `O_NOFOLLOW` on the directory-pin `open` call only refuses a symbolic link
+// at the FINAL path segment; the call still re-walks every ANCESTOR segment
+// of the path from the root, so a symbolic link substituted into an ancestor
+// in the gap between the lock-time containment re-check and the open call is
+// silently followed. On Linux, the copy-back closes that gap by reading the
+// opened descriptor's own kernel-resolved real path back from
+// `/proc/self/fd` and rejecting unless it still names the directory the
+// containment walk approved. This suite proves that check, not the leaf's
+// `O_NOFOLLOW` alone, is what stops a write through a swapped ancestor.
+describe("copyBackCodexAuth ancestor-directory replacement race protection on Linux", () => {
+  const cleanupDirs: string[] = [];
+  const COMPANY_ID = "company-a";
+
+  afterEach(async () => {
+    onFirstOpenCall = null;
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const NEWER = "2026-07-09T02:00:00Z";
+  const OLDER = "2026-07-09T01:00:00Z";
+
+  it("rejects the write instead of installing through an ancestor directory swapped to a symbolic link right after the containment re-check", async () => {
+    if (process.platform !== "linux") return;
+
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-ancestor-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    const companyRoot = path.join(homeDir, "instances", "default", "companies", COMPANY_ID);
+    // An ancestor segment sits BETWEEN the company boundary and the leaf
+    // host directory, so a swap of that segment (not the leaf) is what this
+    // test needs to reach the ancestor-only gap.
+    const ancestorDir = path.join(companyRoot, "subdir");
+    const hostDir = path.join(ancestorDir, "codex-home");
+    const hostAuthPath = path.join(hostDir, "auth.json");
+    await mkdir(hostDir, { recursive: true });
+    const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-intact" });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-ancestor-outside-"));
+    cleanupDirs.push(outsideDir);
+    const outsideHostDir = path.join(outsideDir, "codex-home");
+    await mkdir(outsideHostDir, { recursive: true });
+    // A usable, OLDER same-account decoy at the attacker's redirected
+    // target: with a real destination in place the decision predicate would
+    // pick "use source" (the sandbox copy below is newer), so a leaked
+    // write would overwrite this decoy — the clearest, byte-level proof of a
+    // leaked write, not just an early return.
+    const decoyAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "outside-decoy" });
+    await writeFile(path.join(outsideHostDir, "auth.json"), decoyAuth, { mode: 0o600 });
+
+    // Fires right before the copy-back's directory-pin `open` call, which
+    // runs after the lock-time containment re-check already passed against
+    // the honest ancestor. Swap the ANCESTOR ("subdir"), not the leaf, for a
+    // symbolic link to `outsideDir`: the leaf path segment ("codex-home") is
+    // still a plain directory both before and after the swap, so a
+    // `O_NOFOLLOW` check on the leaf alone cannot see this.
+    onFirstOpenCall = async () => {
+      await rm(ancestorDir, { recursive: true, force: true });
+      await symlink(outsideDir, ancestorDir);
+    };
+
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: NEWER, marker: "sandbox-newer" });
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        companyId: COMPANY_ID,
+        log: () => {},
+        env,
+      }),
+    ).rejects.toThrow(/changed identity/);
+
+    // The decoy at the attacker's redirected target is untouched — the
+    // copy-back never wrote through the swapped ancestor.
+    expect(await readFile(path.join(outsideHostDir, "auth.json"), "utf8")).toBe(decoyAuth);
+    expect(await readdir(outsideHostDir)).toEqual(["auth.json"]);
+  });
+});

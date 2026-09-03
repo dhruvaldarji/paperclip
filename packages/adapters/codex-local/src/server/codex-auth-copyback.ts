@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readlink, rename, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -72,13 +72,16 @@ export interface CopyBackCodexAuthInput {
 }
 
 /**
- * Thrown only when the pinned host directory's identity (its device and
- * inode) no longer matches a fresh, no-follow read of the same path taken
- * immediately before a write. This means something removed and recreated
- * the directory since it was pinned — a directory-replacement race, not a
- * benign "target is outside the managed tree" outcome. A caller must not
- * catch this as benign; it must stay fail-loud like every other unexpected
- * write error.
+ * Thrown only when the host directory's identity no longer matches what an
+ * earlier check approved: either the pinned descriptor's device and inode no
+ * longer match a fresh, no-follow read of the same path taken immediately
+ * before a write, or (Linux only) the descriptor's own kernel-resolved real
+ * path, read back right after it was opened, does not match the directory
+ * the containment walk approved. Either case means something replaced a
+ * directory — the target itself, or one of its ancestors — since the last
+ * check, a directory-replacement race, not a benign "target is outside the
+ * managed tree" outcome. A caller must not catch this as benign; it must
+ * stay fail-loud like every other unexpected write error.
  */
 export class CopyBackDirectoryReplacedError extends Error {
   constructor() {
@@ -104,6 +107,38 @@ export class CopyBackDirectoryReplacedError extends Error {
 async function assertPinnedDirectoryStillLive(pinnedDir: FileHandle, plainDirPath: string): Promise<void> {
   const [pinnedStat, liveStat] = await Promise.all([pinnedDir.stat(), lstat(plainDirPath)]);
   if (pinnedStat.dev !== liveStat.dev || pinnedStat.ino !== liveStat.ino) {
+    throw new CopyBackDirectoryReplacedError();
+  }
+}
+
+/**
+ * Verifies, on Linux only, that an `O_NOFOLLOW`-opened directory descriptor
+ * actually addresses `expectedRealDir` — the exact real path a containment
+ * walk already approved.
+ *
+ * `open(path, O_NOFOLLOW)` still resolves every ANCESTOR segment of `path`
+ * by re-walking the plain path text from the root; `O_NOFOLLOW` only refuses
+ * a symbolic link at the FINAL segment. A symbolic link substituted into an
+ * ancestor segment in the gap between a containment walk and this open call
+ * is silently followed by the kernel, so the open call can succeed while
+ * `pinnedDir` addresses a directory outside the managed tree entirely — an
+ * outcome the open call's own success cannot reveal.
+ *
+ * `/proc/self/fd/<fd>` is a kernel-maintained record of what the descriptor
+ * actually addresses, built from the same dentry the open call resolved to —
+ * not a second re-walk of the same attacker-reachable path text — so reading
+ * it back and comparing against the approved real path closes that gap:
+ * whatever the open call actually landed on, this either confirms it is the
+ * approved directory or rejects it. `/proc` does not exist on a non-Linux
+ * platform, so this additional proof is Linux-only; the pinned-identity
+ * re-checks before each write remain the containment there.
+ */
+async function assertOpenedDirectoryMatchesRealPath(
+  pinnedDir: FileHandle,
+  expectedRealDir: string,
+): Promise<void> {
+  const openedRealDir = await readlink(`/proc/self/fd/${pinnedDir.fd}`);
+  if (openedRealDir !== expectedRealDir) {
     throw new CopyBackDirectoryReplacedError();
   }
 }
@@ -135,24 +170,37 @@ async function assertPinnedDirectoryStillLive(pinnedDir: FileHandle, plainDirPat
  *      `O_DIRECTORY | O_NOFOLLOW` and pin it behind the returned file
  *      descriptor, on every platform. This single open call is itself a
  *      fourth, atomic re-check: it fails outright instead of opening a
- *      symbolic link, so a swap in the gap the third check cannot see
+ *      non-directory or a symbolic link at the FINAL path segment, so a
+ *      swap of that final segment in the gap the third check cannot see
  *      (between that check returning and this open running) is still
- *      caught. On Linux, every write below then resolves through this
- *      descriptor's `/proc/self/fd/<fd>` alias, never through the plain
- *      directory path string again, so a LATER swap of that string cannot
- *      redirect a write the way it could when a write only ever re-used a
- *      path already re-walked from the root. `/proc` does not exist on a
- *      non-Linux platform, so there the writes below instead address the
- *      plain `hostDir` text — but immediately before each of those writes,
- *      with no other `await` in between, the pinned descriptor's identity
- *      (device and inode) is compared against a fresh, no-follow read of
- *      that same plain text. A directory removed and recreated under the
- *      same name is still caught this way even though it is a plain
- *      directory, not a symbolic link, and so cannot be caught by a
- *      symbolic-link-only check. Node.js exposes no `openat` or `renameat`,
- *      so this identity check — immediately before the write it guards —
- *      is the strongest containment the standard library supports without
- *      a Linux-only descriptor pin.
+ *      caught. `O_NOFOLLOW` says nothing about an ANCESTOR segment, though:
+ *      the open call still re-walks the full path from the root, so a
+ *      symbolic link substituted into an ancestor segment in that same gap
+ *      is silently followed, and the open call can succeed while the
+ *      descriptor addresses a directory outside the managed tree. On Linux,
+ *      a fifth check closes that gap: read the descriptor's own
+ *      kernel-resolved real path back from `/proc/self/fd/<fd>` and reject
+ *      unless it still names the exact directory the third check approved —
+ *      a record built from the same dentry the open call resolved to, not a
+ *      second re-walk of the same attacker-reachable path text. Only once
+ *      that check passes do writes below resolve through this descriptor's
+ *      `/proc/self/fd/<fd>` alias, never through the plain directory path
+ *      string again, so a LATER swap of that string cannot redirect a write
+ *      the way it could when a write only ever re-used a path already
+ *      re-walked from the root. `/proc` does not exist on a non-Linux
+ *      platform, so there the fifth check is skipped and the writes below
+ *      instead address the plain `hostDir` text — but immediately before
+ *      each of those writes, with no other `await` in between, the pinned
+ *      descriptor's identity (device and inode) is compared against a
+ *      fresh, no-follow read of that same plain text. A directory removed
+ *      and recreated under the same name is still caught this way even
+ *      though it is a plain directory, not a symbolic link, and so cannot
+ *      be caught by a symbolic-link-only check. Node.js exposes no
+ *      `openat` or `renameat`, so this identity check — immediately before
+ *      the write it guards — is the strongest containment the standard
+ *      library supports without a Linux-only descriptor pin, and an
+ *      ancestor swap landing before the fourth check on a non-Linux
+ *      platform remains an accepted, documented residual risk.
  *   4. Stage the bytes to a `0600` temp file inside the pinned directory
  *      (same filesystem as the host target, which doubles as the predicate
  *      `source`). The open uses `O_EXCL` so it fails instead of following or
@@ -273,18 +321,36 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         await log(skippedOutsideTreeLog);
         return "kept-host";
       }
-      // On Linux, every write below resolves through this descriptor's
-      // `/proc/self/fd/<fd>` alias, not the plain `canonicalHostDir` text
-      // used until now, so a swap of that text AFTER this point can no
-      // longer redirect a write. `/proc` does not exist on a non-Linux
-      // platform, so there `writeDirPath` stays the plain `canonicalHostDir`
-      // text, and each write below calls {@link assertPinnedDirectoryStillLive}
-      // immediately beforehand to re-verify that text still names the
-      // SAME directory `pinnedDir` was opened against.
-      const writeDirPath =
-        process.platform === "linux" ? `/proc/self/fd/${pinnedDir.fd}` : canonicalHostDir;
 
       try {
+        // `open()` still resolves every ANCESTOR segment of `canonicalHostDir`
+        // by re-walking the plain path text from the root; `O_NOFOLLOW` above
+        // only refused a symbolic link at the FINAL segment. A symbolic link
+        // substituted into an ancestor segment in the gap between the
+        // containment walk above and the open call just now would be
+        // silently followed by the kernel, so the open call above could have
+        // succeeded while `pinnedDir` addresses a directory outside the
+        // managed tree — an outcome the open call's own success cannot
+        // reveal. Close that gap on Linux by reading the descriptor's own
+        // kernel-resolved real path back and rejecting unless it is still
+        // the exact directory the containment walk approved. `/proc` does
+        // not exist on a non-Linux platform, so this additional proof is
+        // Linux-only.
+        if (process.platform === "linux") {
+          await assertOpenedDirectoryMatchesRealPath(pinnedDir, canonicalHostDir);
+        }
+
+        // On Linux, every write below resolves through this descriptor's
+        // `/proc/self/fd/<fd>` alias, not the plain `canonicalHostDir` text
+        // used until now, so a swap of that text AFTER this point can no
+        // longer redirect a write. `/proc` does not exist on a non-Linux
+        // platform, so there `writeDirPath` stays the plain `canonicalHostDir`
+        // text, and each write below calls {@link assertPinnedDirectoryStillLive}
+        // immediately beforehand to re-verify that text still names the
+        // SAME directory `pinnedDir` was opened against.
+        const writeDirPath =
+          process.platform === "linux" ? `/proc/self/fd/${pinnedDir.fd}` : canonicalHostDir;
+
         const canonicalHostAuthPath = path.join(canonicalHostDir, hostAuthFileName);
 
         // Stage on the same filesystem as the host target so both the predicate read
