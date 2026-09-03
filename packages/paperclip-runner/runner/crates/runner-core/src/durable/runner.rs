@@ -45,6 +45,8 @@ enum CommandLifecycle {
     Shutdown,
 }
 
+const TERMINAL_RESULT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn sleep_for_reconnect(base: Duration, max_delay: Duration, attempt: &mut u32) {
     let multiplier = 1_u128 << (*attempt).min(5);
     let uncapped = base.as_millis().saturating_mul(multiplier);
@@ -267,6 +269,7 @@ pub fn run_durable_runner<E: CommandExecutor>(
         if let Some(acked_source_seq) = welcome.acked_source_seq {
             state.apply_ack(acked_source_seq)?;
         }
+        let connection = welcome.connection;
         if state.pending_terminal_delivery.is_some() {
             return reconcile_pending_terminal_delivery(
                 &mut state,
@@ -274,6 +277,7 @@ pub fn run_durable_runner<E: CommandExecutor>(
                 &config,
                 &mut executor,
                 &mut transport,
+                &connection,
                 &welcome.pending_commands,
             );
         }
@@ -310,7 +314,20 @@ pub fn run_durable_runner<E: CommandExecutor>(
                 break;
             }
             if lifecycle.durable_state().is_some() {
-                complete_terminal_delivery_after_send(&mut state, &store, &result)?;
+                if let Err(error) = wait_for_terminal_result_ack(
+                    &mut transport,
+                    &mut state,
+                    &store,
+                    &connection,
+                    &result,
+                ) {
+                    return stop_after_terminal_result_delivery_failure(
+                        &mut state,
+                        &store,
+                        &mut executor,
+                        error,
+                    );
+                }
                 // A terminal lifecycle command is the final command this
                 // process may accept. Flush its already-durable outbox below,
                 // then release the executor without observing later commands.
@@ -338,8 +355,7 @@ pub fn run_durable_runner<E: CommandExecutor>(
             .filter(|_| !disconnected)
         {
             debug_assert_eq!(state.lifecycle, durable_lifecycle);
-            executor.shutdown()?;
-            return Ok(());
+            return finish_terminal_transition_after_ack(&mut state, &store, &mut executor);
         }
         if disconnected {
             disconnected_since.get_or_insert_with(Instant::now);
@@ -350,8 +366,6 @@ pub fn run_durable_runner<E: CommandExecutor>(
             sleep_before_deadline(config.reconnect_delay, reconnect_deadline);
             continue;
         }
-
-        let connection = welcome.connection;
         loop {
             if started.elapsed() >= config.max_runtime {
                 break;
@@ -439,7 +453,20 @@ pub fn run_durable_runner<E: CommandExecutor>(
                         break;
                     }
                     if lifecycle.durable_state().is_some() {
-                        complete_terminal_delivery_after_send(&mut state, &store, &result)?;
+                        if let Err(error) = wait_for_terminal_result_ack(
+                            &mut transport,
+                            &mut state,
+                            &store,
+                            &connection,
+                            &result,
+                        ) {
+                            return stop_after_terminal_result_delivery_failure(
+                                &mut state,
+                                &store,
+                                &mut executor,
+                                error,
+                            );
+                        }
                     }
                     if let Err(error) = send_outbox(&mut transport, &state, &mut sent_source_seq) {
                         state.record_diagnostic(
@@ -459,8 +486,11 @@ pub fn run_durable_runner<E: CommandExecutor>(
                     }
                     if let Some(durable_lifecycle) = lifecycle.durable_state() {
                         debug_assert_eq!(state.lifecycle, durable_lifecycle);
-                        executor.shutdown()?;
-                        return Ok(());
+                        return finish_terminal_transition_after_ack(
+                            &mut state,
+                            &store,
+                            &mut executor,
+                        );
                     }
                 }
                 Some("revoke") => {
@@ -545,25 +575,99 @@ fn persist_lifecycle_before_command_delivery(
     store.save(state)
 }
 
-fn complete_terminal_delivery_after_send(
+fn complete_terminal_delivery_after_cleanup(
     state: &mut DurableState,
     store: &DurableStateStore,
-    result: &StoredCommandResult,
 ) -> Result<(), DurableRunnerError> {
     let pending = state.pending_terminal_delivery.as_ref().ok_or_else(|| {
-        DurableRunnerError::invalid("terminal result delivery has no durable recovery fence")
+        DurableRunnerError::invalid("terminal cleanup has no durable recovery fence")
     })?;
-    if pending.command_id != result.command_id
-        || pending.controller_seq != result.controller_seq
-        || pending.command_type != result.command_type
-        || state.lifecycle != pending.lifecycle
-    {
+    if state.lifecycle != pending.lifecycle {
         return Err(DurableRunnerError::invalid(
-            "terminal result delivery does not match its durable recovery fence",
+            "terminal cleanup does not match its durable recovery fence",
         ));
     }
     state.pending_terminal_delivery = None;
     store.save(state)
+}
+
+fn finish_terminal_transition_after_ack<E: CommandExecutor>(
+    state: &mut DurableState,
+    store: &DurableStateStore,
+    executor: &mut E,
+) -> Result<(), DurableRunnerError> {
+    // Keep the durable fence through provider cleanup. If cleanup fails, a
+    // replacement may authenticate only to retry terminal reconciliation and
+    // cannot restore the suspended runner to ready.
+    executor.shutdown()?;
+    complete_terminal_delivery_after_cleanup(state, store)
+}
+
+fn wait_for_terminal_result_ack(
+    transport: &mut AuthenticatedTransport,
+    state: &mut DurableState,
+    store: &DurableStateStore,
+    connection: &ConnectionMetadata,
+    result: &StoredCommandResult,
+) -> Result<(), DurableRunnerError> {
+    let deadline = Instant::now() + TERMINAL_RESULT_ACK_TIMEOUT;
+    while Instant::now() < deadline {
+        let Some(message) = transport.receive_json()? else {
+            continue;
+        };
+        validate_control_identity(&message, state, Some(connection))?;
+        match message.get("kind").and_then(Value::as_str) {
+            Some("command_result_ack") => {
+                let payload = message
+                    .get("payload")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        DurableRunnerError::invalid(
+                            "terminal command result acknowledgement payload is required",
+                        )
+                    })?;
+                if payload.get("commandId").and_then(Value::as_str)
+                    != Some(result.command_id.as_str())
+                    || payload.get("commandType").and_then(Value::as_str)
+                        != Some(result.command_type.as_str())
+                    || payload.get("controllerSeq").and_then(Value::as_u64)
+                        != Some(result.controller_seq)
+                    || payload.get("status").and_then(Value::as_str) != Some(result.status.as_str())
+                {
+                    return Err(DurableRunnerError::invalid(
+                        "terminal command result acknowledgement changed its durable identity",
+                    ));
+                }
+                return Ok(());
+            }
+            Some("ack") => {
+                let acked = message
+                    .pointer("/payload/ackedSourceSeq")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| DurableRunnerError::invalid("ACK cursor is required"))?;
+                state.apply_ack(acked)?;
+                store.save(state)?;
+            }
+            Some("ping") => transport.send_json(&control_envelope(
+                state,
+                connection,
+                "pong",
+                json!({
+                    "lifecycle": state.lifecycle,
+                    "ackedSourceSeq": state.acked_source_seq,
+                    "outboxBytes": state.outbox_bytes(),
+                }),
+            ))?,
+            _ => {
+                return Err(DurableRunnerError::invalid(
+                    "controller sent a non-acknowledgement after a terminal command result",
+                ));
+            }
+        }
+    }
+    Err(DurableRunnerError::invalid(
+        "terminal command result acknowledgement timed out",
+    ))
 }
 
 fn reconcile_pending_terminal_delivery<E: CommandExecutor>(
@@ -572,6 +676,7 @@ fn reconcile_pending_terminal_delivery<E: CommandExecutor>(
     config: &DurableRunnerConfig,
     executor: &mut E,
     transport: &mut AuthenticatedTransport,
+    connection: &ConnectionMetadata,
     pending_commands: &[Command],
 ) -> Result<(), DurableRunnerError> {
     let pending = state.pending_terminal_delivery.clone().ok_or_else(|| {
@@ -597,7 +702,11 @@ fn reconcile_pending_terminal_delivery<E: CommandExecutor>(
         if let Err(error) = transport.send_json(&command_result_envelope(state, &result)) {
             return stop_after_terminal_result_delivery_failure(state, store, executor, error);
         }
-        complete_terminal_delivery_after_send(state, store, &result)?;
+        if let Err(error) =
+            wait_for_terminal_result_ack(transport, state, store, connection, &result)
+        {
+            return stop_after_terminal_result_delivery_failure(state, store, executor, error);
+        }
     } else {
         // An authenticated welcome is the controller's authoritative pending
         // set. Absence means the prior write reached the controller even if
@@ -605,7 +714,6 @@ fn reconcile_pending_terminal_delivery<E: CommandExecutor>(
         state.record_diagnostic(
             "controller confirmed the pending terminal result was already delivered",
         );
-        state.pending_terminal_delivery = None;
         store.save(state)?;
     }
 
@@ -616,7 +724,7 @@ fn reconcile_pending_terminal_delivery<E: CommandExecutor>(
         let _ = executor.shutdown();
         return Err(error);
     }
-    executor.shutdown()
+    finish_terminal_transition_after_ack(state, store, executor)
 }
 
 fn stop_after_terminal_result_delivery_failure<E: CommandExecutor>(
@@ -982,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_terminal_result_delivery_clears_the_recovery_fence() {
+    fn successful_terminal_cleanup_clears_the_recovery_fence() {
         let directory = std::env::temp_dir().join(format!(
             "paperclip-runner-terminal-result-delivered-{}",
             std::process::id()
@@ -1004,12 +1112,45 @@ mod tests {
         )
         .unwrap();
         assert!(state.pending_terminal_delivery.is_some());
-        complete_terminal_delivery_after_send(&mut state, &store, &result).unwrap();
+        complete_terminal_delivery_after_cleanup(&mut state, &store).unwrap();
         let (recovered, existed) = store.load_or_create(&config).unwrap();
 
         assert!(existed);
         assert_eq!(recovered.lifecycle, "suspended");
         assert!(recovered.pending_terminal_delivery.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_terminal_cleanup_keeps_the_recovery_fence() {
+        let directory = std::env::temp_dir().join(format!(
+            "paperclip-runner-terminal-cleanup-failed-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let config = config(directory.clone());
+        let store = DurableStateStore::new(&directory).unwrap();
+        let (mut state, _) = store.load_or_create(&config).unwrap();
+        let mut executor = ShutdownFailingExecutor;
+        let command = command("runner.suspend");
+        let (result, lifecycle) =
+            process_command(&mut state, &store, &config, &mut executor, &command).unwrap();
+        persist_lifecycle_before_command_delivery(
+            &mut state,
+            &store,
+            lifecycle.durable_state().unwrap(),
+            &result,
+        )
+        .unwrap();
+
+        let error = finish_terminal_transition_after_ack(&mut state, &store, &mut executor)
+            .expect_err("cleanup failure remains fenced");
+        let (recovered, existed) = store.load_or_create(&config).unwrap();
+
+        assert!(error.to_string().contains("terminal cleanup failure"));
+        assert!(existed);
+        assert_eq!(recovered.lifecycle, "suspended");
+        assert!(recovered.pending_terminal_delivery.is_some());
         fs::remove_dir_all(directory).unwrap();
     }
 
