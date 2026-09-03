@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 
 export const DAYTONA_IMAGE_CONTENT_SCHEMA =
-  "paperclip-daytona-runner-image-content/v3";
+  "paperclip-daytona-runner-image-content/v4";
 export const DAYTONA_IMAGE_PLATFORM = "linux/amd64";
 export const DAYTONA_IMAGE_DOCKERFILE_PATH = "docker/daytona-runner/Dockerfile";
 
@@ -27,10 +27,29 @@ export const DAYTONA_IMAGE_INPUT_PATHS = [
   "packages/paperclip-runner",
 ] as const;
 
-const ignoredDirectoryPaths = new Set([
+const ignoredGeneratedDirectoryPaths = new Set([
   "packages/paperclip-runner/dist",
   "packages/paperclip-runner/runner/target",
 ]);
+
+// These paths may be copied into Docker's provider-build context, but they do
+// not contribute to the release runnerd binary or the executable/digested
+// provider-pack runtime payload. Keep the exclusions narrow and package-scoped:
+// unknown non-documentation files remain hashed by default, so a newly
+// introduced runtime input fails safe by invalidating the image key.
+const ignoredRunnerDevelopmentDirectoryPaths = new Set([
+  "packages/paperclip-runner/devtools",
+  "packages/paperclip-runner/docs",
+  "packages/paperclip-runner/examples",
+  "packages/paperclip-runner/test",
+  "packages/paperclip-runner/test-fixtures",
+  "packages/paperclip-runner/test-support",
+]);
+
+const runnerDocumentationFilePattern = /\.md$/;
+const runnerTestFilePattern = /\.(?:spec|test)\.(?:[cm]?[jt]sx?)$/;
+const runnerRustIntegrationTestPathPattern =
+  /^packages\/paperclip-runner\/runner\/crates\/[^/]+\/tests(?:\/|$)/;
 
 export interface DaytonaImageContentOptions {
   repositoryRoot?: string;
@@ -49,8 +68,18 @@ function normalizedRelativePath(value: string): string {
 }
 
 function shouldIgnore(relativePath: string): boolean {
-  if (ignoredDirectoryPaths.has(relativePath)) return true;
+  if (ignoredGeneratedDirectoryPaths.has(relativePath)) return true;
   return relativePath.split("/").includes("node_modules");
+}
+
+function shouldIgnoreRunnerDevelopmentInput(relativePath: string): boolean {
+  if (!relativePath.startsWith("packages/paperclip-runner/")) return false;
+  if (ignoredRunnerDevelopmentDirectoryPaths.has(relativePath)) return true;
+  return (
+    runnerDocumentationFilePattern.test(relativePath) ||
+    runnerTestFilePattern.test(relativePath) ||
+    runnerRustIntegrationTestPathPattern.test(relativePath)
+  );
 }
 
 function updateRecord(
@@ -160,7 +189,12 @@ async function hashEntry(
   relativePath: string,
 ): Promise<void> {
   const normalizedPath = normalizedRelativePath(relativePath);
-  if (shouldIgnore(normalizedPath)) return;
+  if (
+    shouldIgnore(normalizedPath) ||
+    shouldIgnoreRunnerDevelopmentInput(normalizedPath)
+  ) {
+    return;
+  }
 
   const absolutePath = path.resolve(root, relativePath);
   const relativeFromRoot = path.relative(root, absolutePath);

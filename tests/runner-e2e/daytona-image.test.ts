@@ -177,6 +177,102 @@ describe("runner E2E Daytona image contract", () => {
     }
   });
 
+  it("reuses the image for runner-only tests and documentation", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "paperclip-daytona-runner-development-inputs-"),
+    );
+    const options = {
+      repositoryRoot: root,
+      inputPaths: ["packages/paperclip-runner"],
+      baseImages: [`example.test/base:1@sha256:${"a".repeat(64)}`],
+      frontendDigest: `sha256:${"c".repeat(64)}`,
+    } as const;
+    try {
+      const runnerRoot = path.join(root, "packages/paperclip-runner");
+      await mkdir(path.join(runnerRoot, "src/live"), { recursive: true });
+      await mkdir(path.join(runnerRoot, "docs"), { recursive: true });
+      await mkdir(path.join(runnerRoot, "spec"), { recursive: true });
+      await mkdir(path.join(runnerRoot, "test-fixtures"), { recursive: true });
+      await mkdir(path.join(runnerRoot, "runner/crates/runner-core/src"), {
+        recursive: true,
+      });
+      await mkdir(path.join(runnerRoot, "runner/crates/runner-core/tests"), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(runnerRoot, "src/live/transport.ts"),
+        "export const runtime = 'one';\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "runner/crates/runner-core/src/lib.rs"),
+        'pub const RUNTIME: &str = "one";\n',
+      );
+      await writeFile(path.join(runnerRoot, "README.md"), "first readme\n");
+      await writeFile(
+        path.join(runnerRoot, "docs/local-runner.md"),
+        "first documentation\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "spec/architecture.md"),
+        "first architecture note\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "src/live/transport.test.ts"),
+        "first TypeScript test\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "test-fixtures/provider.json"),
+        '{"fixture":"one"}\n',
+      );
+      await writeFile(
+        path.join(runnerRoot, "runner/crates/runner-core/tests/recovery.rs"),
+        "// first Rust integration test\n",
+      );
+
+      const baseline = await computeDaytonaImageContentId(options);
+      await writeFile(path.join(runnerRoot, "README.md"), "second readme\n");
+      await writeFile(
+        path.join(runnerRoot, "docs/local-runner.md"),
+        "second documentation\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "spec/architecture.md"),
+        "second architecture note\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "src/live/transport.test.ts"),
+        "second TypeScript test\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "test-fixtures/provider.json"),
+        '{"fixture":"two"}\n',
+      );
+      await writeFile(
+        path.join(runnerRoot, "runner/crates/runner-core/tests/recovery.rs"),
+        "// second Rust integration test\n",
+      );
+      expect(await computeDaytonaImageContentId(options)).toBe(baseline);
+
+      await writeFile(
+        path.join(runnerRoot, "src/live/transport.ts"),
+        "export const runtime = 'two';\n",
+      );
+      expect(await computeDaytonaImageContentId(options)).not.toBe(baseline);
+
+      await writeFile(
+        path.join(runnerRoot, "src/live/transport.ts"),
+        "export const runtime = 'one';\n",
+      );
+      await writeFile(
+        path.join(runnerRoot, "runner/crates/runner-core/src/lib.rs"),
+        'pub const RUNTIME: &str = "two";\n',
+      );
+      expect(await computeDaytonaImageContentId(options)).not.toBe(baseline);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects mutable Docker base references", () => {
     expect(() => extractDaytonaBaseImages("FROM node:24-bookworm\n")).toThrow(
       "must use an immutable sha256 digest",
