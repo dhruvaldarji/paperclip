@@ -130,6 +130,16 @@ const ACPX_SANDBOX_ROOT_GATE_STAGE_INFIX = ".stage-";
 // `ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS`, so a waiting admission gets
 // more than one chance to recover the gate before it gives up.
 const ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS = 1_000;
+// A single well-known path (not a random one) for the lock that serializes
+// stale-gate recovery attempts for one gate across every Runner process. See
+// `withAcpxRuntimeSandboxRootGateRecoveryLock`.
+const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_SUFFIX = ".recovering";
+// One recovery attempt only runs local filesystem calls, never blocking I/O
+// on another process, so it always finishes well inside this bound. A lock
+// still held past it can only mean its own holder crashed mid-recovery; a
+// later attempt then clears it, instead of leaving every admission for this
+// root to wait out the full gate acquire timeout.
+const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS = 5_000;
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -449,6 +459,13 @@ export interface AcpxRuntimeSandboxPrepareDependencies {
    * its place.
    */
   beforeGateRelease?: () => Promise<void>;
+  /**
+   * Internal test seam. Runs once this admission has won the stale-gate
+   * recovery lock, immediately before it inspects the gate. Lets a test hold
+   * the lock open and prove a second, concurrent recovery attempt backs off
+   * instead of racing its own capture of the same gate.
+   */
+  afterRecoveryLockAcquired?: () => Promise<void>;
 }
 
 /** Prepare the private filesystem and environment visible to an ACPX agent. */
@@ -786,6 +803,12 @@ interface AcpxRuntimeSandboxRootGateDependencies {
    * ever touching whatever a fresh claimant has since put in its place.
    * Exercised only in tests. */
   beforeGateRelease?: () => Promise<void>;
+  /** Internal seam that runs once this admission has won the stale-gate
+   * recovery lock, immediately before it inspects the gate. Lets a test hold
+   * the lock open and prove a second, concurrent recovery attempt backs off
+   * instead of racing its own capture of the same gate. Exercised only in
+   * tests. */
+  afterRecoveryLockAcquired?: () => Promise<void>;
 }
 
 /**
@@ -818,8 +841,13 @@ async function withAcpxRuntimeSandboxRootGate<T>(
     }
     // The gate is held by another admission. Break it only when that holder
     // is provably gone (a crashed process), never on a mere timeout, so a
-    // slow-but-live holder is never pre-empted.
-    await breakStaleAcpxRuntimeSandboxRootGate(gatePath, dependencies);
+    // slow-but-live holder is never pre-empted. Run the break itself under
+    // the recovery lock, so at most one admission ever inspects and removes
+    // a given dead gate at a time — see
+    // `withAcpxRuntimeSandboxRootGateRecoveryLock`.
+    await withAcpxRuntimeSandboxRootGateRecoveryLock(gatePath, dependencies, () =>
+      breakStaleAcpxRuntimeSandboxRootGate(gatePath, dependencies),
+    );
     if (Date.now() >= deadline) {
       throw new Error(
         "ACPX sandbox root ownership gate could not be acquired",
@@ -1019,6 +1047,101 @@ async function reclaimAcpxRuntimeSandboxRootGateCapture(
     });
     if (contents !== ownContent) continue;
     await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+  }
+}
+
+// Serializes stale-gate recovery attempts for one gate across every Runner
+// process, using a single well-known lock path (not a random one, unlike
+// every other private path this file creates), so at most one admission
+// ever runs `breakStaleAcpxRuntimeSandboxRootGate` for a given gate at a
+// time.
+//
+// Without this lock, two admissions can independently pin the same dead
+// gate, both prove its holder dead, and both proceed to remove it. The
+// first admission's removal atomically vacates the shared path and deletes
+// the dead gate for good. In the instant the shared path is vacant, a fresh
+// claimant can win it with its own live gate — before the SECOND admission
+// even runs its own removal. That second admission's removal then captures
+// the fresh claimant's live gate instead of the dead one it pinned, so it
+// must vacate the shared path again to inspect what it caught, and restore
+// it once it proves the capture is not its own. That second vacate-then
+// -restore step is itself a fresh window: a further claimant can win the
+// shared path inside it and start running its own critical section fully
+// concurrently with the live holder recovery just displaced, defeating the
+// exclusivity this whole gate exists to give.
+//
+// Serializing recovery closes this at the source: only one admission is
+// ever mid-recovery for a given gate, so its own removal step is always
+// the very first thing to touch the shared path since it proved that gate
+// stale. Nothing else can have replaced the gate in between, so its removal
+// always captures the exact dead gate it pinned, and the vacate-then-restore
+// case this lock protects against becomes unreachable in production — kept
+// here only as a defensive fallback for a change that has not proved this
+// invariant.
+//
+// The lock itself only guards a short run of local filesystem calls, never
+// blocking I/O on another process, so a live lock holder always finishes
+// well inside `ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS`. A lock still
+// held past that age can only mean its own holder crashed mid-recovery;
+// this call then clears it so a later attempt is not blocked forever by a
+// lock its own holder can never release.
+async function withAcpxRuntimeSandboxRootGateRecoveryLock(
+  gatePath: string,
+  dependencies: AcpxRuntimeSandboxRootGateDependencies,
+  recovery: () => Promise<void>,
+): Promise<void> {
+  const lockPath = `${gatePath}${ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_SUFFIX}`;
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      lockPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      PRIVATE_FILE_MODE,
+    );
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw error;
+    // Another admission is already recovering this gate. Clear the lock
+    // only once it is old enough that its own holder must have crashed
+    // mid-recovery, and either way, back off for this call: attempting the
+    // gate's own recovery here too is exactly the race this lock exists to
+    // prevent. A stale lock cleared here lets the NEXT retry in
+    // `withAcpxRuntimeSandboxRootGate`'s loop acquire it cleanly, instead of
+    // this call racing a second recovery attempt into the same gate.
+    const entry = await stat(lockPath).catch((statError) => {
+      if (errorCode(statError) === "ENOENT") return null;
+      throw statError;
+    });
+    if (
+      entry !== null &&
+      Date.now() - entry.mtimeMs >= ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS
+    ) {
+      await unlink(lockPath).catch((unlinkError) => {
+        if (errorCode(unlinkError) !== "ENOENT") throw unlinkError;
+      });
+    }
+    return;
+  }
+  // The lock's own existence, at this one well-known path, is the whole
+  // exclusivity primitive: nothing here ever inspects its content, only its
+  // presence and its age, so — like the lease files beside it — it carries
+  // no content and is never synced. Losing an un-synced create on a crash
+  // only means the lock looks absent right after a reboot, the same as a
+  // clean release; it never causes a live lock to look absent.
+  try {
+    await handle.chmod(PRIVATE_FILE_MODE);
+  } finally {
+    await handle.close();
+  }
+  try {
+    await dependencies.afterRecoveryLockAcquired?.();
+    await recovery();
+  } finally {
+    await unlink(lockPath).catch((error) => {
       if (errorCode(error) !== "ENOENT") throw error;
     });
   }
