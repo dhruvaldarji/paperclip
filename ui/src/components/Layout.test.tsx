@@ -429,7 +429,7 @@ describe("Layout", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("replaces the app sidebar with settings navigation on settings routes", async () => {
+  it("keeps the app sidebar beside settings navigation on settings routes", async () => {
     currentPathname = "/PAP/company/settings/access";
     mockPluginSlots.slots = [
       {
@@ -471,7 +471,10 @@ describe("Layout", () => {
     await flushReact();
 
     expect(container.textContent).toContain("Company settings sidebar");
-    expect(container.textContent).not.toContain("Main company nav");
+    expect(container.textContent).toContain("Main company nav");
+    const secondaryRail = container.querySelector("[data-secondary-sidebar]");
+    expect(secondaryRail?.classList.contains("w-60")).toBe(true);
+    expect(secondaryRail?.classList.contains("bg-background")).toBe(true);
     expect(container.textContent).not.toContain("Company rail");
     expect(container.textContent).not.toContain("Instance sidebar");
     expect(container.textContent).not.toContain("Plugin route sidebar");
@@ -550,7 +553,7 @@ describe("Layout", () => {
     });
   });
 
-  it("renders the company settings sidebar on instance settings routes", async () => {
+  it("keeps the company nav beside settings on instance settings routes", async () => {
     currentPathname = "/PAP/company/settings/instance/general";
     const root = createRoot(container);
     const queryClient = new QueryClient({
@@ -568,7 +571,7 @@ describe("Layout", () => {
     await flushReact();
 
     expect(container.textContent).toContain("Company settings sidebar");
-    expect(container.textContent).not.toContain("Main company nav");
+    expect(container.textContent).toContain("Main company nav");
     expect(container.textContent).not.toContain("Company rail");
     expect(container.textContent).not.toContain("Plugin route sidebar");
 
@@ -578,7 +581,7 @@ describe("Layout", () => {
   });
 
   it.each(["/PAP/company/export", "/PAP/company/import"])(
-    "renders the shared settings sidebar on %s",
+    "keeps the company nav beside the shared settings sidebar on %s",
     async (pathname) => {
       currentPathname = pathname;
       const root = createRoot(container);
@@ -597,7 +600,7 @@ describe("Layout", () => {
       await flushReact();
 
       expect(container.textContent).toContain("Company settings sidebar");
-      expect(container.textContent).not.toContain("Main company nav");
+      expect(container.textContent).toContain("Main company nav");
 
       await act(async () => {
         root.unmount();
