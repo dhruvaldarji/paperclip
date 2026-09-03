@@ -5,9 +5,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   assertNoSymlinkInManagedCredentialPath,
+  assertNoSymlinkInManagedCredentialPathAndCaptureAncestors,
   ManagedCredentialHomeRejectedError,
   resolveManagedCredentialHomeBoundary,
 } from "@paperclipai/adapter-utils/managed-credential-home";
+import type { ManagedCredentialAncestorIdentity } from "@paperclipai/adapter-utils/managed-credential-home";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import {
   isCodexAuthCacheEnabled,
@@ -73,15 +75,21 @@ export interface CopyBackCodexAuthInput {
 
 /**
  * Thrown only when the host directory's identity no longer matches what an
- * earlier check approved: either the pinned descriptor's device and inode no
- * longer match a fresh, no-follow read of the same path taken immediately
- * before a write, or (Linux only) the descriptor's own kernel-resolved real
- * path, read back right after it was opened, does not match the directory
- * the containment walk approved. Either case means something replaced a
- * directory — the target itself, or one of its ancestors — since the last
- * check, a directory-replacement race, not a benign "target is outside the
- * managed tree" outcome. A caller must not catch this as benign; it must
- * stay fail-loud like every other unexpected write error.
+ * earlier check approved:
+ * - the pinned descriptor's device and inode no longer match a fresh,
+ *   no-follow read of the same path, taken immediately before a write; or
+ * - (Linux only) the descriptor's own kernel-resolved real path, read back
+ *   right after it was opened, does not match the directory the containment
+ *   walk approved; or
+ * - (every other platform) one of the containment walk's recorded ancestor
+ *   segments no longer matches a fresh, no-follow read of that same
+ *   ancestor path, taken right after the directory-pin open call succeeded.
+ *
+ * Each case means something replaced a directory — the target itself, or
+ * one of its ancestors — since the last check, a directory-replacement
+ * race, not a benign "target is outside the managed tree" outcome. A caller
+ * must not catch this as benign; it must stay fail-loud like every other
+ * unexpected write error.
  */
 export class CopyBackDirectoryReplacedError extends Error {
   constructor() {
@@ -144,6 +152,59 @@ async function assertOpenedDirectoryMatchesRealPath(
 }
 
 /**
+ * Verifies, on a non-Linux platform only, that every ancestor segment
+ * {@link assertNoSymlinkInManagedCredentialPathAndCaptureAncestors} recorded
+ * during the lock-time containment walk still carries the SAME device and
+ * inode.
+ *
+ * `open(path, O_NOFOLLOW)` still resolves every ANCESTOR segment of `path`
+ * by re-walking the plain path text from the root; `O_NOFOLLOW` only
+ * refuses a symbolic link at the FINAL segment. A symbolic link substituted
+ * into an ancestor segment in the gap between the containment walk and the
+ * directory-pin open call is silently followed by the kernel, so that open
+ * call can succeed while the pinned descriptor addresses a directory
+ * outside the managed tree — an outcome its own success cannot reveal. When
+ * the attacker LEAVES that ancestor swapped in place, a plain `lstat` of
+ * the LEAF path alone cannot see it either: resolved through the same
+ * swapped ancestor, it reports the same identity as the (attacker-pointing)
+ * pinned descriptor, so a leaf-only identity check agrees with the pin and
+ * passes. Comparing each ANCESTOR segment's identity instead catches this:
+ * a symbolic link substituted into an ancestor reports the symbolic link's
+ * OWN identity here, not the real directory's it stood in for, so the
+ * comparison fails and this rejects. An ancestor swap that is instead
+ * RESTORED before a write is caught the other way: the pinned descriptor
+ * still addresses the attacker's directory while the leaf path now resolves
+ * through the restored ancestor to the real one, so the leaf identity check
+ * a caller runs before each write (see the module-level `copyBackCodexAuth`
+ * documentation) rejects that case. Call this once, immediately after the
+ * pin `open` call succeeds, with no other `await` in between.
+ */
+async function assertManagedCredentialAncestorsStillLive(
+  ancestorIdentities: readonly ManagedCredentialAncestorIdentity[],
+): Promise<void> {
+  const liveStats = await Promise.all(ancestorIdentities.map((identity) => lstat(identity.path)));
+  for (const [index, identity] of ancestorIdentities.entries()) {
+    const liveStat = liveStats[index];
+    // A symbolic link substituted at this ancestor is rejected on file type
+    // alone, never on device/inode alone: a freshly created filesystem
+    // object CAN be handed back the exact device/inode pair a just-removed
+    // directory held (some filesystems reuse a just-freed inode number
+    // immediately), so a symbolic link swapped in could coincidentally
+    // match the recorded identity even though it is no longer a directory
+    // at all. Checking the live entry is still a plain directory closes
+    // that gap independently of any such reuse.
+    if (
+      liveStat.isSymbolicLink() ||
+      !liveStat.isDirectory() ||
+      liveStat.dev !== identity.dev ||
+      liveStat.ino !== identity.ino
+    ) {
+      throw new CopyBackDirectoryReplacedError();
+    }
+  }
+}
+
+/**
  * Guards, locks, and atomically installs a strictly-newer sandbox Codex
  * `auth.json` onto the shared host credential at teardown.
  *
@@ -188,19 +249,28 @@ async function assertOpenedDirectoryMatchesRealPath(
  *      string again, so a LATER swap of that string cannot redirect a write
  *      the way it could when a write only ever re-used a path already
  *      re-walked from the root. `/proc` does not exist on a non-Linux
- *      platform, so there the fifth check is skipped and the writes below
- *      instead address the plain `hostDir` text — but immediately before
- *      each of those writes, with no other `await` in between, the pinned
- *      descriptor's identity (device and inode) is compared against a
- *      fresh, no-follow read of that same plain text. A directory removed
- *      and recreated under the same name is still caught this way even
- *      though it is a plain directory, not a symbolic link, and so cannot
- *      be caught by a symbolic-link-only check. Node.js exposes no
- *      `openat` or `renameat`, so this identity check — immediately before
- *      the write it guards — is the strongest containment the standard
- *      library supports without a Linux-only descriptor pin, and an
- *      ancestor swap landing before the fourth check on a non-Linux
- *      platform remains an accepted, documented residual risk.
+ *      platform, so there the fifth check instead re-verifies every ancestor
+ *      segment the second check (step 2) recorded the device and inode of,
+ *      with a fresh, no-follow `lstat` of each: an ancestor symbolic link
+ *      substituted in the same gap and LEFT in place reports its own
+ *      identity here, not the real directory's, so this still catches it
+ *      even though the leaf path alone — resolved through that same swapped
+ *      ancestor — would report the same identity as the (attacker-pointing)
+ *      descriptor and so cannot. The writes below then still address the
+ *      plain `hostDir` text — but immediately before each of those writes,
+ *      with no other `await` in between, the pinned descriptor's identity
+ *      (device and inode) is compared against a fresh, no-follow read of
+ *      that same plain text. A directory removed and recreated under the
+ *      same name is still caught this way even though it is a plain
+ *      directory, not a symbolic link, and so cannot be caught by a
+ *      symbolic-link-only check; an ancestor swap that is RESTORED before a
+ *      write — the case the fifth check's one-time, right-after-open
+ *      comparison cannot see — is caught here instead, because the pinned
+ *      descriptor still addresses the attacker's directory while the leaf
+ *      path now resolves through the restored ancestor to the real one.
+ *      Node.js exposes no `openat` or `renameat`, so together these two
+ *      identity checks are the strongest containment the standard library
+ *      supports without a Linux-only descriptor pin.
  *   4. Stage the bytes to a `0600` temp file inside the pinned directory
  *      (same filesystem as the host target, which doubles as the predicate
  *      `source`). The open uses `O_EXCL` so it fails instead of following or
@@ -289,9 +359,19 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
       // with no `await` in between, and use it for every write below. This
       // catches a symbolic-link swap that happened during the `mkdir` call
       // or the lock-acquisition wait, the gap the check above cannot see.
+      // Recording the ancestor identities here, alongside the symlink
+      // re-check, lets the pinned-open path below re-verify each of them
+      // after the open succeeds — see
+      // `assertManagedCredentialAncestorsStillLive`. A caller that omits
+      // `companyId` has no `boundary`, so `ancestorIdentities` stays empty
+      // and that later re-check becomes a no-op for it, same as this walk.
+      let ancestorIdentities: ManagedCredentialAncestorIdentity[] = [];
       if (boundary) {
         try {
-          await assertNoSymlinkInManagedCredentialPath(boundary, canonicalHostDir);
+          ancestorIdentities = await assertNoSymlinkInManagedCredentialPathAndCaptureAncestors(
+            boundary,
+            canonicalHostDir,
+          );
         } catch (error) {
           if (!(error instanceof ManagedCredentialHomeRejectedError)) {
             throw error;
@@ -334,10 +414,17 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
         // reveal. Close that gap on Linux by reading the descriptor's own
         // kernel-resolved real path back and rejecting unless it is still
         // the exact directory the containment walk approved. `/proc` does
-        // not exist on a non-Linux platform, so this additional proof is
-        // Linux-only.
+        // not exist on a non-Linux platform, so there this instead
+        // re-verifies every ancestor segment the containment walk above
+        // recorded: a symbolic link substituted into an ancestor and LEFT in
+        // place carries its own identity, not the real directory's, so that
+        // comparison still catches it even though a plain `lstat` of the
+        // LEAF path alone — resolved through the same swapped ancestor —
+        // cannot. See `assertManagedCredentialAncestorsStillLive`.
         if (process.platform === "linux") {
           await assertOpenedDirectoryMatchesRealPath(pinnedDir, canonicalHostDir);
+        } else {
+          await assertManagedCredentialAncestorsStillLive(ancestorIdentities);
         }
 
         // On Linux, every write below resolves through this descriptor's

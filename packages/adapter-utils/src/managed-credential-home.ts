@@ -262,6 +262,13 @@ export async function resolveManagedCredentialHomeBoundary(
   return companyDir;
 }
 
+/** The device and inode `fs.lstat` reported for one existing ancestor directory segment, at the moment a containment walk checked it. */
+export interface ManagedCredentialAncestorIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+}
+
 /**
  * Verifies every EXISTING directory segment between `boundary` (a path
  * {@link resolveManagedCredentialHomeBoundary} already verified) and
@@ -269,6 +276,21 @@ export async function resolveManagedCredentialHomeBoundary(
  * existing part of the chain is caught. Stops at the first segment that
  * does not exist yet — a copy-back may still create it, and a missing
  * segment carries no symbolic link to check.
+ *
+ * Returns the device and inode this walk recorded for every checked
+ * segment EXCEPT `target` itself — every existing ANCESTOR of `target`, in
+ * order. A caller that separately pins `target` behind a directory
+ * descriptor can re-`lstat` these same ancestor paths after that open call
+ * succeeds and compare identities, to catch a symbolic link substituted
+ * into an ancestor segment in the gap between this walk and that open call,
+ * then LEFT in place: `open`'s own `O_NOFOLLOW` flag only refuses a
+ * symbolic link at the FINAL path segment, so it cannot see that swap, and
+ * neither can a plain `lstat` of `target` alone — resolved through the same
+ * swapped ancestor, it reports the same identity as the (attacker-pointing)
+ * pinned descriptor. `target` itself is excluded because a caller re-checks
+ * it a different way: against the pinned descriptor's own identity,
+ * immediately before each write, not against a value this walk recorded
+ * before the open call ran.
  *
  * Node.js exposes no `openat`, `mkdirat`, or `renameat`, so this walk
  * cannot pin a directory file descriptor across the segments the way a
@@ -278,30 +300,49 @@ export async function resolveManagedCredentialHomeBoundary(
  * still be rebound in the gap between this call returning and the write
  * that follows it.
  */
-export async function assertNoSymlinkInManagedCredentialPath(
+export async function assertNoSymlinkInManagedCredentialPathAndCaptureAncestors(
   boundary: string,
   target: string,
-): Promise<void> {
+): Promise<ManagedCredentialAncestorIdentity[]> {
   const relative = path.relative(boundary, target);
-  if (relative === "") return;
+  if (relative === "") return [];
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
     rejectCredentialHome();
   }
 
+  const segments = relative.split(path.sep);
+  const ancestorIdentities: ManagedCredentialAncestorIdentity[] = [];
   let current = boundary;
-  for (const segment of relative.split(path.sep)) {
-    current = path.join(current, segment);
+  for (let i = 0; i < segments.length; i++) {
+    current = path.join(current, segments[i]);
     let stat;
     try {
       stat = await fs.lstat(current);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return ancestorIdentities;
       throw error;
     }
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       rejectCredentialHome();
     }
+    const isTargetItself = i === segments.length - 1;
+    if (!isTargetItself) {
+      ancestorIdentities.push({ path: current, dev: stat.dev, ino: stat.ino });
+    }
   }
+  return ancestorIdentities;
+}
+
+/**
+ * Verifies every EXISTING directory segment between `boundary` and `target`,
+ * the same way as {@link assertNoSymlinkInManagedCredentialPathAndCaptureAncestors},
+ * for a caller that only needs the pass/reject outcome.
+ */
+export async function assertNoSymlinkInManagedCredentialPath(
+  boundary: string,
+  target: string,
+): Promise<void> {
+  await assertNoSymlinkInManagedCredentialPathAndCaptureAncestors(boundary, target);
 }
 
 /**
