@@ -34,26 +34,82 @@ function rejectCredentialHome(): never {
   throw new ManagedCredentialHomeRejectedError();
 }
 
+/** Splits an absolute path into its root (`/`, or a drive letter such as `C:\`) followed by each directory segment, in order. */
+function splitPathIntoSegments(absolutePath: string): string[] {
+  const { root } = path.parse(absolutePath);
+  const rest = absolutePath.slice(root.length);
+  const segments = rest.split(path.sep).filter((segment) => segment.length > 0);
+  return [root, ...segments];
+}
+
+/**
+ * True when `dir` contains exactly one entry whose name matches `name` when
+ * both are compared in lower case.
+ *
+ * On a filesystem that folds case, two spellings that differ only by letter
+ * case cannot both exist as separate entries in the same directory — the
+ * filesystem stores one entry, addressable by any casing. On a filesystem
+ * that does not fold case, an attacker can create a second, distinct entry
+ * next to the expected one, differing only by letter case. Counting the
+ * matching entries tells these two situations apart directly, without any
+ * assumption about the host platform.
+ */
+async function directoryHasExactlyOneEntryIgnoringCase(dir: string, name: string): Promise<boolean> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const target = name.toLowerCase();
+  return entries.filter((entry) => entry.toLowerCase() === target).length === 1;
+}
+
 /**
  * True when `realPath` (the output of `fs.realpath`) matches `literalPath`
  * (the same path built from configuration, not yet resolved) closely enough
  * to trust as the SAME location, not a redirect to a different one.
  *
- * An exact match always passes. On a case-insensitive filesystem — the
- * default on macOS and Windows — `fs.realpath` can return the on-disk
- * spelling of a directory whose configured casing differs only by letter
- * case; two strings that differ only by letter case address the same file on
- * that filesystem, so tolerate that difference there. Linux is excluded: its
- * default filesystems are case-sensitive, so two differently-cased strings
- * there name two different directories, and a symbolic link could redirect
- * one to the other. Restricting the tolerance to non-Linux platforms keeps a
- * genuine redirect on Linux caught, while a same-location casing difference
- * on macOS or Windows no longer rejects a valid managed home.
+ * An exact match always passes. Otherwise this walks both paths segment by
+ * segment. A segment pair must match exactly, or match only by letter case —
+ * anything else is a real redirect, rejected immediately. For a
+ * letter-case-only segment, this checks the real parent directory on disk
+ * with {@link directoryHasExactlyOneEntryIgnoringCase}: exactly one matching
+ * entry means the filesystem folds case there, so the difference is benign;
+ * two or more means a colliding, differently-cased entry exists, so the
+ * difference is treated as a redirect and rejected.
+ *
+ * This does not assume case-folding from the host platform. A non-Linux
+ * platform is not proof of a case-insensitive filesystem — macOS and other
+ * non-Linux hosts can mount or format a case-sensitive filesystem — so a
+ * platform check alone could accept a redirect through a colliding,
+ * differently-cased sibling entry. Checking the actual directory entries
+ * instead catches that redirect on every platform.
  */
-function realPathMatchesLiteral(realPath: string, literalPath: string): boolean {
+async function realPathMatchesLiteral(realPath: string, literalPath: string): Promise<boolean> {
   if (realPath === literalPath) return true;
-  if (process.platform === "linux") return false;
-  return realPath.toLowerCase() === literalPath.toLowerCase();
+
+  const realSegments = splitPathIntoSegments(realPath);
+  const literalSegments = splitPathIntoSegments(literalPath);
+  if (realSegments.length !== literalSegments.length) return false;
+
+  let realPrefix = "";
+  for (let i = 0; i < realSegments.length; i++) {
+    const realSegment = realSegments[i];
+    const literalSegment = literalSegments[i];
+    if (realSegment !== literalSegment) {
+      if (realSegment.toLowerCase() !== literalSegment.toLowerCase()) return false;
+      // The root segment (a drive letter or the POSIX "/") has no parent
+      // directory to hold a colliding sibling, so a case-only difference
+      // there is tolerated directly, with no directory check to run.
+      if (i > 0 && !(await directoryHasExactlyOneEntryIgnoringCase(realPrefix, realSegment))) {
+        return false;
+      }
+    }
+    realPrefix = i === 0 ? realSegment : path.join(realPrefix, realSegment);
+  }
+  return true;
 }
 
 /** True when `segment` is exactly one path component: not empty, not `.` or `..`, and free of a path separator. */
@@ -125,8 +181,8 @@ async function resolveRealPathAllowingMissingSegments(candidateDir: string): Pro
  *   through the same target, so the `companies`-only check below cannot
  *   catch it on its own; this check must run first. A same-location
  *   difference of letter case only, the kind a case-insensitive filesystem's
- *   `fs.realpath` can return on macOS or Windows, is not a redirect and does
- *   not reject — see {@link realPathMatchesLiteral}.
+ *   `fs.realpath` can return, is not a redirect and does not reject — see
+ *   {@link realPathMatchesLiteral}.
  * - the `companies` directory does not exist.
  * - the `companies` directory is a symbolic link, or sits anywhere other
  *   than `<realInstanceRoot>/companies` once resolved — this stops a
@@ -161,11 +217,12 @@ export async function resolveManagedCredentialHomeBoundary(
   // below re-derives its expected value from `realInstanceRoot`, so it
   // resolves through the SAME redirect on both sides and cannot detect this
   // on its own. Require the resolved instance root to match the literal,
-  // unresolved `instanceRoot` (tolerating a letter-case-only difference on a
-  // non-Linux platform — see {@link realPathMatchesLiteral}); anything else
-  // means some ancestor component is a symbolic link, so reject before it
-  // can be adopted as the boundary.
-  if (!realPathMatchesLiteral(realInstanceRoot, instanceRoot)) {
+  // unresolved `instanceRoot` (tolerating a letter-case-only difference the
+  // real filesystem itself confirms is benign — see
+  // {@link realPathMatchesLiteral}); anything else means some ancestor
+  // component is a symbolic link, so reject before it can be adopted as the
+  // boundary.
+  if (!(await realPathMatchesLiteral(realInstanceRoot, instanceRoot))) {
     rejectCredentialHome();
   }
 
@@ -181,10 +238,10 @@ export async function resolveManagedCredentialHomeBoundary(
   // `realCompaniesRoot` to any external location `fs.realpath` is willing to
   // follow. Require it to land at `<realInstanceRoot>/companies` — the only
   // location a managed `companies` directory may occupy, tolerating a
-  // letter-case-only difference on a non-Linux platform the same way as the
-  // instance-root check above — so a redirected companies root is rejected
-  // instead of silently adopted as the credential-write boundary.
-  if (!realPathMatchesLiteral(realCompaniesRoot, path.join(realInstanceRoot, "companies"))) {
+  // letter-case-only difference the same way as the instance-root check
+  // above — so a redirected companies root is rejected instead of silently
+  // adopted as the credential-write boundary.
+  if (!(await realPathMatchesLiteral(realCompaniesRoot, path.join(realInstanceRoot, "companies")))) {
     rejectCredentialHome();
   }
 

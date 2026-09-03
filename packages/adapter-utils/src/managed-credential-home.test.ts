@@ -254,12 +254,15 @@ describe("assertManagedCredentialHome", () => {
 // On a case-insensitive filesystem (the default on macOS and Windows),
 // `fs.realpath` can return the on-disk spelling of a directory whose
 // configured casing (from `PAPERCLIP_HOME`) differs only by letter case. This
-// suite forces `process.platform` to a non-Linux value and stubs `realpath`
-// to reproduce that exact scenario against a real temp directory tree — the
-// test filesystem itself is case-sensitive, so a genuine case-insensitive
-// `realpath` behavior has to be simulated — to prove a same-location casing
-// difference no longer rejects a valid managed home, while containment and
-// symlink rejection still hold.
+// suite stubs `realpath` to reproduce that exact scenario against a real temp
+// directory tree — the test filesystem itself is case-sensitive, so a
+// genuine case-insensitive `realpath` behavior has to be simulated — to prove
+// a same-location casing difference no longer rejects a valid managed home,
+// while containment and symlink rejection still hold. `process.platform` is
+// still forced to a non-Linux value in each test as a reminder that the
+// guard's behavior must not depend on the host platform; the guard checks
+// on-disk directory entries instead, so the forced value does not change the
+// outcome.
 describe("assertManagedCredentialHome on a case-insensitive filesystem", () => {
   const cleanupDirs: string[] = [];
   const originalPlatform = process.platform;
@@ -347,6 +350,49 @@ describe("assertManagedCredentialHome on a case-insensitive filesystem", () => {
 
     await expect(
       assertManagedCredentialHome({ env, companyId, candidateDir: linkPath }),
+    ).rejects.toThrow("outside the company-managed directory tree");
+  });
+
+  it("rejects a same-cased-looking symbolic link that actually redirects to a colliding, differently-cased directory", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const homeDir = await mkdtemp(
+      path.join(os.tmpdir(), "paperclip-managed-credential-home-casecollision-"),
+    );
+    cleanupDirs.push(homeDir);
+    const companyId = "company-a";
+
+    // A directory named "INSTANCES" — a sibling of the literal "instances"
+    // name, differing only by letter case. On a case-sensitive filesystem,
+    // this is a distinct, attacker-controlled directory, not the same entry
+    // a case-insensitive filesystem would report for either spelling.
+    const attackerInstancesDir = path.join(homeDir, "INSTANCES");
+    const attackerCompanyDir = path.join(attackerInstancesDir, "default", "companies", companyId);
+    await mkdir(attackerCompanyDir, { recursive: true });
+
+    // The literal "instances" path is a symbolic link to that colliding
+    // sibling. `fs.realpath` on the literal instance root then returns a
+    // path that differs from it only by the letter case of this one
+    // segment — the exact shape a genuine case-insensitive filesystem also
+    // produces, but here it is a real redirect to a different directory.
+    await symlink(attackerInstancesDir, path.join(homeDir, "instances"), "dir");
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+
+    // Build the candidate the same way an honest caller would: from the
+    // literal, lowercase "instances" spelling, not from the attacker's
+    // directory directly. This is what makes the redirect dangerous — the
+    // literal candidate reaches the attacker's tree only because the
+    // instance-root check above adopted it as the boundary.
+    const literalCandidateDir = path.join(
+      homeDir,
+      "instances",
+      "default",
+      "companies",
+      companyId,
+      "codex-home",
+    );
+
+    await expect(
+      assertManagedCredentialHome({ env, companyId, candidateDir: literalCandidateDir }),
     ).rejects.toThrow("outside the company-managed directory tree");
   });
 });
