@@ -95,9 +95,9 @@ function acpxExecution(
             ? "@earendil-works/pi-coding-agent"
             : agent === "codex"
               ? "@openai/codex"
-              : null,
+              : "@anthropic-ai/claude-agent-sdk",
         agentRuntimeVersion:
-          agent === "pi" ? "0.84.2" : agent === "codex" ? "0.148.0" : null,
+          agent === "pi" ? "0.84.2" : agent === "codex" ? "0.148.0" : "0.3.232",
         commandDigest:
           agent === "codex"
             ? "sha256:7a923b3829884d3cabcc9659d22cace3f86813e7bfffc90974b10140a45bc400"

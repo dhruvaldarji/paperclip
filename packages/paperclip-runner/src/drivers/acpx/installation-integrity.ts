@@ -755,8 +755,9 @@ function defaultPackageJsonResolver(
   }
   // Source-mode and direct runtimes still have a stable module URL. The
   // descriptor-backed runner sidecar always receives the explicit root above.
-  return createRequire(issuerPackageJsonPath ?? import.meta.url).resolve(
-    `${packageName}/package.json`,
+  return resolvePackageJsonFromIssuer(
+    packageName,
+    issuerPackageJsonPath ?? import.meta.url,
   );
 }
 
