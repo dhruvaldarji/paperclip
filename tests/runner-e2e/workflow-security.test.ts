@@ -59,6 +59,12 @@ describe("public repository paid workflow security", () => {
     }
 
     const fullStack = workflows[0]!.contents;
+    expect(fullStack).toContain(
+      "runs-on: runs-on/fleet=paperclip-public-pr-x64/env=public-ci",
+    );
+    expect(fullStack).toContain(
+      "RUNNER_E2E_MAX_PARALLEL must be an integer from 1 through 100.",
+    );
     for (const [secret, condition] of Object.entries({
       OPENAI_API_KEY: "matrix.credentialName == 'OPENAI_API_KEY'",
       ANTHROPIC_API_KEY: "matrix.credentialName == 'ANTHROPIC_API_KEY'",
