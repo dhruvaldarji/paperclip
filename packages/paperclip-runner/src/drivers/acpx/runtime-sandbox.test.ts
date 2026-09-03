@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -10,6 +11,7 @@ import {
   rm,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -522,6 +524,85 @@ describe("ACPX runtime sandbox", () => {
 
     const siblingEntries = await readdir(dirname(first.root));
     expect(siblingEntries).not.toContain(`${basename(first.root)}.gate`);
+  });
+
+  it("recovers a gate left behind by a holder process that no longer exists", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    await writeFile(gatePath, String(deadHolder.pid), { flag: "wx" });
+
+    const recovered = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(recovered.root).toBe(probe.root);
+    await expect(stat(gatePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await removeOwnedAcpxRuntimeSandboxRoot(recovered);
+  });
+
+  it("never removes a live gate that replaced the stale gate recovery inspected", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    await writeFile(gatePath, String(deadHolder.pid), { flag: "wx" });
+
+    vi.resetModules();
+    const recoveringProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    // Once recovery has read the dead gate and proved its holder is gone,
+    // but before it removes the gate by pathname, replace the file at that
+    // same path with a fresh, live gate — simulating a second admission
+    // that broke in on the same dead gate first and is now using it. Its
+    // content names this test process, the same real process the
+    // recovering call also runs in, plus a marker suffix production code
+    // never writes itself: a plain pid alone cannot tell this exact
+    // replacement apart from a later gate the recovering call might create
+    // for its own use, since both would then name the same pid.
+    const replacementGateContents = `${process.pid}:live-replacement`;
+    const recovered = recoveringProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        beforeStaleGateRemoval: async () => {
+          await unlink(gatePath);
+          await writeFile(gatePath, replacementGateContents, { flag: "wx" });
+        },
+      },
+    );
+
+    await waitForConcurrentClaimHeadStart();
+    // Finding anything other than this exact marker — the file gone, or a
+    // fresh gate holding only this process's own acquisition token — proves
+    // recovery removed the live replacement it found in place of the dead
+    // gate it inspected.
+    await expect(readFile(gatePath, "utf8")).resolves.toBe(
+      replacementGateContents,
+    );
+
+    // Free the replacement gate, as its own holder would on completing its
+    // claim, so the still-retrying recovery call above can proceed.
+    await unlink(gatePath);
+
+    const sandbox = await recovered;
+    expect(sandbox.root).toBe(probe.root);
+    await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
   });
 });
 

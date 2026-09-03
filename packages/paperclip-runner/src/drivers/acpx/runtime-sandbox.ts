@@ -396,6 +396,14 @@ export interface AcpxRuntimeSandboxPrepareDependencies {
    * before the rest of the sandbox is built.
    */
   afterRootOwned?: () => Promise<void>;
+  /**
+   * Internal test seam. Runs after stale-gate recovery has read a gate file
+   * and proved its holder is dead, immediately before recovery re-checks
+   * the gate's identity and removes it. Lets a test replace the gate at
+   * this same path in that gap, to prove the removal that follows targets
+   * only the exact gate instance recovery inspected.
+   */
+  beforeStaleGateRemoval?: () => Promise<void>;
 }
 
 /** Prepare the private filesystem and environment visible to an ACPX agent. */
@@ -431,7 +439,7 @@ export async function prepareAcpxRuntimeSandbox(
   // this admission continues without delete authority, and its own cleanup
   // later finds the marker does not carry its identifier and leaves the
   // live root alone.
-  const owner = await claimAcpxRuntimeSandboxRoot(root);
+  const owner = await claimAcpxRuntimeSandboxRoot(root, dependencies);
   try {
     await dependencies.afterRootOwned?.();
     const stateDirectory = await ensurePrivateDirectory(
@@ -716,6 +724,10 @@ function acpxRuntimeSandboxRootGatePath(root: string): string {
   );
 }
 
+interface AcpxRuntimeSandboxRootGateDependencies {
+  beforeStaleGateRemoval?: () => Promise<void>;
+}
+
 /**
  * Run `criticalSection` as the sole holder of the gate for `root`, across
  * every Runner process. The gate is a file created with O_CREAT|O_EXCL, the
@@ -727,6 +739,7 @@ function acpxRuntimeSandboxRootGatePath(root: string): string {
 async function withAcpxRuntimeSandboxRootGate<T>(
   root: string,
   criticalSection: () => Promise<T>,
+  dependencies: AcpxRuntimeSandboxRootGateDependencies = {},
 ): Promise<T> {
   const gatePath = acpxRuntimeSandboxRootGatePath(root);
   const deadline = Date.now() + ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS;
@@ -743,7 +756,7 @@ async function withAcpxRuntimeSandboxRootGate<T>(
     // The gate is held by another admission. Break it only when that holder
     // is provably gone (a crashed process), never on a mere timeout, so a
     // slow-but-live holder is never pre-empted.
-    await breakStaleAcpxRuntimeSandboxRootGate(gatePath);
+    await breakStaleAcpxRuntimeSandboxRootGate(gatePath, dependencies);
     if (Date.now() >= deadline) {
       throw new Error(
         "ACPX sandbox root ownership gate could not be acquired",
@@ -772,7 +785,17 @@ async function acquireAcpxRuntimeSandboxRootGate(
   }
   try {
     await handle.chmod(PRIVATE_FILE_MODE);
-    await handle.writeFile(String(process.pid), "utf8");
+    // The holder pid, plus a random per-acquisition token so this exact
+    // gate instance can be told apart from a same-pid replacement created
+    // at the same path later. A device-and-inode check cannot do this: a
+    // delete immediately followed by a create at the same path can reuse
+    // the just-freed inode number on some filesystems (observed on ext4),
+    // so a replacement gate can carry the very same identity the deleted
+    // one had.
+    await handle.writeFile(
+      `${process.pid}:${randomBytes(16).toString("hex")}`,
+      "utf8",
+    );
     await handle.sync();
   } finally {
     await handle.close();
@@ -784,10 +807,26 @@ async function acquireAcpxRuntimeSandboxRootGate(
 // so a hard process crash inside the critical section cannot block every
 // later admission for this root forever. Never removes a gate whose holder
 // is still alive, or one this process cannot prove is dead.
+//
+// Another admission can replace the gate at this same path — release the
+// stale one and create a fresh, live one — in the gap between the read
+// below and the unlink. An unlink by pathname alone would then remove that
+// live replacement, not the dead gate this call inspected. A device-and-
+// inode check cannot guard against this: deleting a file and immediately
+// creating a new one at the same path can reuse the just-freed inode
+// number on some filesystems, so a replacement gate can carry the very
+// identity the deleted one had. Instead, this function records the exact
+// bytes of the gate it inspected — the holder pid plus the random
+// per-acquisition token `acquireAcpxRuntimeSandboxRootGate` writes — and
+// re-reads the path immediately before unlinking, removing it only when
+// the bytes still match exactly. A collision between two gates' random
+// tokens is not a practical concern.
 async function breakStaleAcpxRuntimeSandboxRootGate(
   gatePath: string,
+  dependencies: AcpxRuntimeSandboxRootGateDependencies = {},
 ): Promise<void> {
   let holderPid: number | null = null;
+  let inspectedContents: string;
   try {
     const handle = await open(
       gatePath,
@@ -795,7 +834,8 @@ async function breakStaleAcpxRuntimeSandboxRootGate(
     );
     try {
       const bytes = await readFile(handle);
-      const parsed = Number.parseInt(bytes.toString("utf8").trim(), 10);
+      inspectedContents = bytes.toString("utf8").trim();
+      const parsed = Number.parseInt(inspectedContents, 10);
       holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
     } finally {
       await handle.close();
@@ -805,6 +845,20 @@ async function breakStaleAcpxRuntimeSandboxRootGate(
     return;
   }
   if (holderPid !== null && isAcpxSandboxRootGateHolderAlive(holderPid)) {
+    return;
+  }
+  await dependencies.beforeStaleGateRemoval?.();
+  let currentContents: string;
+  try {
+    currentContents = (await readFile(gatePath)).toString("utf8").trim();
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (currentContents !== inspectedContents) {
+    // The file at this path no longer carries the exact bytes this call
+    // inspected — another admission already replaced it. Leave the
+    // replacement alone.
     return;
   }
   await unlink(gatePath).catch((error) => {
@@ -842,6 +896,7 @@ function reportDeclinedAcpxSandboxRootClaim(root: string): void {
 
 async function claimAcpxRuntimeSandboxRoot(
   root: string,
+  dependencies: AcpxRuntimeSandboxRootGateDependencies = {},
 ): Promise<AcpxRuntimeSandboxRootOwner> {
   const entry = await lstat(root, { bigint: true });
   if (entry.isSymbolicLink() || !entry.isDirectory()) {
@@ -859,17 +914,22 @@ async function claimAcpxRuntimeSandboxRoot(
   // The marker write and the lease registration run as one gated step, so a
   // concurrent teardown's lease count can never land between them and miss
   // this admission's occupancy.
-  const claimed = await withAcpxRuntimeSandboxRootGate(root, async () => {
-    const won = await writeAcpxSandboxRootMarkerExclusive(
-      markerPath,
-      identifier,
-    );
-    // Register this admission's own durable lease before returning, whether
-    // or not it won the marker, so its occupancy is visible to any process
-    // that later reads the root's leases — including this one.
-    await registerAcpxRuntimeSandboxRootLease(root, identifier);
-    return won;
-  });
+  const claimed = await withAcpxRuntimeSandboxRootGate(
+    root,
+    async () => {
+      const won = await writeAcpxSandboxRootMarkerExclusive(
+        markerPath,
+        identifier,
+      );
+      // Register this admission's own durable lease before returning,
+      // whether or not it won the marker, so its occupancy is visible to
+      // any process that later reads the root's leases — including this
+      // one.
+      await registerAcpxRuntimeSandboxRootLease(root, identifier);
+      return won;
+    },
+    dependencies,
+  );
   if (!claimed) {
     // Another admission already owns this deterministic root. Continue
     // without delete authority: never overwrite its marker, never touch the
