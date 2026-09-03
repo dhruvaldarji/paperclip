@@ -118,12 +118,16 @@ describe("runner E2E catalog", () => {
     const question = localIntegrityTasks.find(
       (task) => task.id === "structured-question-resume",
     );
+    const breadthTasks = openRouterBreadthTasks.map((task) =>
+      task.buildPrompt("nonce"),
+    );
 
     for (const prompt of [
       message?.buildPrompt("nonce"),
       ask?.buildPrompt("nonce"),
       plan?.buildPrompt("nonce"),
       question?.buildPrompt("nonce"),
+      ...breadthTasks,
     ]) {
       expect(prompt).toContain("first emit");
       expect(prompt!.indexOf("first emit")).toBeLessThan(
@@ -132,6 +136,19 @@ describe("runner E2E catalog", () => {
       expect(prompt).toContain(
         "Do not wait for the terminal tool result before emitting the response",
       );
+    }
+
+    for (const taskId of [
+      "question-resume-complete",
+      "plan-approve-complete",
+    ]) {
+      const prompt = openRouterBreadthTasks
+        .find((task) => task.id === taskId)
+        ?.buildPrompt("nonce");
+      expect(prompt).toContain(
+        "do not spell, quote, repeat, announce, or include",
+      );
+      expect(prompt).toContain("refer to it only as “the terminal marker.”");
     }
   });
 

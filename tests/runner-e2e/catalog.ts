@@ -635,8 +635,7 @@ export const openRouterBreadthTasks: readonly RunnerTaskFixture[] = [
     buildPrompt: (nonce) =>
       [
         "Complete this deterministic hello task in one turn.",
-        `Return ${breadthMarker("H", nonce)} as the complete visible response.`,
-        `Call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("H", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]} and mark the task Done.`,
+        `In the same provider turn first emit exactly ${breadthMarker("H", nonce)} as the complete user-facing final response, then call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("H", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]}. Do not wait for the terminal tool result before emitting the response, and do not call another tool.`,
         "Do not create files, plans, interactions, or additional work.",
       ].join("\n"),
     buildMatchers: (nonce, execution) =>
@@ -661,8 +660,9 @@ export const openRouterBreadthTasks: readonly RunnerTaskFixture[] = [
       [
         "Ask the user one structured question before completing this task.",
         `Call request_human_input exactly once with idempotencyKey \`question-${nonce}\`, interactionKind \`questions\`, title \`Verification word\`, prompt \`Choose the verification word\`, continuationPolicy \`wake_assignee\`, and payload {version:1,questions:[{id:\`verification-word\`,prompt:\`Choose the verification word.\`,selectionMode:\`single\`,required:true,options:[{id:\`cobalt\`,label:\`Cobalt\`},{id:\`amber\`,label:\`Amber\`}]}]}.`,
+        `Before the answer arrives, do not spell, quote, repeat, announce, or include ${breadthMarker("Q_C", nonce)} in any visible response, comment, or tool payload; refer to it only as “the terminal marker.”`,
         "Do not call paperclip_finish while the question is pending.",
-        `After the answer arrives, if it is Cobalt, return ${breadthMarker("Q_C", nonce)} visibly and call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("Q_C", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]}.`,
+        `After the answer arrives, if it is Cobalt, in the same provider turn first emit exactly ${breadthMarker("Q_C", nonce)} as the complete user-facing final response, then call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("Q_C", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]}. Do not wait for the terminal tool result before emitting the response, and do not call another tool.`,
         "Do not create files, plans, or additional work.",
       ].join("\n"),
     buildMatchers: (nonce, execution) =>
@@ -688,8 +688,9 @@ export const openRouterBreadthTasks: readonly RunnerTaskFixture[] = [
         "Create a canonical Plan with exactly two numbered steps and request approval; do not implement before approval.",
         `The Plan body must contain ${breadthMarker("P_READY", nonce)}.`,
         "Call write_document for key `plan`, then call request_human_input exactly once with interactionKind `confirmation`, targetRevisionId set to the returned latest Plan revision, and continuationPolicy `wake_assignee`.",
+        `Before that exact Plan revision is accepted, do not spell, quote, repeat, announce, or include ${breadthMarker("P_OK", nonce)} in any visible response, comment, or tool payload; refer to it only as “the terminal marker.”`,
         "Do not call paperclip_finish while confirmation is pending.",
-        `After that exact Plan revision is accepted, return ${breadthMarker("P_OK", nonce)} visibly and call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("P_OK", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]}.`,
+        `After that exact Plan revision is accepted, in the same provider turn first emit exactly ${breadthMarker("P_OK", nonce)} as the complete user-facing final response, then call paperclip_finish exactly once with {reportedWorkDisposition:"done",summary:"${breadthMarker("P_OK", nonce)}",completionClaim:{contractRevision:"1",objectiveSatisfied:true,criteria:[{criterionId:"objective",status:"satisfied",evidenceRefs:[]}],remainingWork:[]},evidence:[],verification:[]}. Do not wait for the terminal tool result before emitting the response, and do not call another tool.`,
         "Do not create files, child tasks, or unrelated work.",
       ].join("\n"),
     buildMatchers: (nonce, execution) =>
