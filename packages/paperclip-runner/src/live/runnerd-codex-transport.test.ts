@@ -11,6 +11,7 @@ import {
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
 
@@ -140,14 +141,26 @@ it.each(["acpx-runtime-sidecar.cjs", "opencode-app-server-proxy.cjs"] as const)(
   },
 );
 
-it("derives the ACPX package root only from the verified dist/cli layout", () => {
+it("derives the ACPX package authority only from the verified dist/cli layout", () => {
+  const runnerPackageRoot = fileURLToPath(new URL("../..", import.meta.url));
   expect(
-    runnerdLaunchProfileInternals.acpxProviderPackageRoot(
+    runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
+      resolve(runnerPackageRoot, "dist/cli/acpx-runtime-sidecar.cjs"),
+    ),
+  ).toEqual({
+    root: resolve(runnerPackageRoot, "../.."),
+    manifest: resolve(runnerPackageRoot, "package.json"),
+  });
+  expect(
+    runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
       "/provider-pack/dist/cli/acpx-runtime-sidecar.cjs",
     ),
-  ).toBe("/provider-pack");
+  ).toEqual({
+    root: "/provider-pack",
+    manifest: "/provider-pack/package.json",
+  });
   expect(() =>
-    runnerdLaunchProfileInternals.acpxProviderPackageRoot(
+    runnerdLaunchProfileInternals.acpxProviderPackageAuthority(
       "/unverified/acpx-runtime-sidecar.cjs",
     ),
   ).toThrow("ACPX sidecar must use the provider package dist/cli layout");
@@ -446,6 +459,8 @@ it.each([
           PATH: "/bin",
           ...credentialEnvironment,
           PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT: "/attacker/package-root",
+          PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
+            "/attacker/package-root/package.json",
           PAPERCLIP_API_KEY: "must-not-reach-provider",
           DATABASE_URL: "must-not-reach-provider",
         },
@@ -472,6 +487,8 @@ it.each([
       PAPERCLIP_NORMALIZED_SESSION_ID: "session-1",
       PAPERCLIP_NATIVE_RUNTIME_CONTEXT_PATH: "/isolated/runtime-context.json",
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT: "/verified/provider-pack",
+      PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
+        "/verified/provider-pack/package.json",
     });
     for (const key of allowed)
       expect(environment[key]).toBe(credentialEnvironment[key]);

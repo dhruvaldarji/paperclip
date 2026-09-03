@@ -76,6 +76,39 @@ describe("ACPX installation integrity", () => {
       "explicit normalized absolute path",
     );
 
+    const runnerPackage = join(root, "packages", "paperclip-runner");
+    const runnerManifest = join(runnerPackage, "package.json");
+    const pnpmProviderDirectory = join(
+      root,
+      "node_modules",
+      ".pnpm",
+      "qualified-provider@1.0.0",
+      "node_modules",
+      "pnpm-provider",
+    );
+    await Promise.all([
+      mkdir(join(runnerPackage, "node_modules"), { recursive: true }),
+      mkdir(pnpmProviderDirectory, { recursive: true }),
+      writeFile(runnerManifest, JSON.stringify({ private: true })),
+      writeFile(
+        join(pnpmProviderDirectory, "package.json"),
+        JSON.stringify({ name: "pnpm-provider", version: "1.0.0" }),
+      ),
+    ]);
+    await symlink(
+      pnpmProviderDirectory,
+      join(runnerPackage, "node_modules", "pnpm-provider"),
+    );
+    expect(
+      createAcpxPackageJsonResolver(root, runnerManifest)("pnpm-provider"),
+    ).toBe(join(pnpmProviderDirectory, "package.json"));
+
+    const outsideManifest = join(parent, "outside-package.json");
+    await writeFile(outsideManifest, JSON.stringify({ private: true }));
+    expect(() =>
+      createAcpxPackageJsonResolver(root, outsideManifest),
+    ).toThrow("manifest resolves outside the selected provider root");
+
     const ancestorProviderDirectory = join(
       parent,
       "node_modules",

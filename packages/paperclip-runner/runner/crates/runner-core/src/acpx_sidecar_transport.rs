@@ -120,6 +120,7 @@ impl AcpxSidecarTransport {
             "PAPERCLIP_NATIVE_MCP_NAME",
             "PAPERCLIP_NATIVE_MCP_URL",
             "PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT",
+            "PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST",
         ];
         keys.extend_from_slice(credential_keys);
         Self::start_with_environment_keys(config, &keys)

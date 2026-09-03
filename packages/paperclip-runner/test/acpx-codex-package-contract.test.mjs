@@ -32,6 +32,12 @@ const claudePatch = await readFile(
 );
 
 test("the runner pins every qualified ACPX production dependency", () => {
+  assert.equal(runnerPackage.dependencies.node, "24.11.0");
+  assert.equal(runnerPackage.dependencies["@openai/codex"], "0.148.0");
+  assert.equal(
+    runnerPackage.optionalDependencies["@openai/codex-linux-x64"],
+    "npm:@openai/codex@0.148.0-linux-x64",
+  );
   assert.equal(runnerPackage.dependencies.acpx, "0.13.1");
   assert.equal(
     runnerPackage.dependencies["@agentclientprotocol/codex-acp"],

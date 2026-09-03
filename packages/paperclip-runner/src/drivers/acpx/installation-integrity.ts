@@ -218,6 +218,7 @@ export type AcpxPackageJsonResolver = (packageName: string) => string;
 
 export function createAcpxPackageJsonResolver(
   providerPackageRoot: string | undefined,
+  providerPackageManifest?: string,
 ): AcpxPackageJsonResolver {
   const root = providerPackageRoot?.trim();
   if (
@@ -230,7 +231,26 @@ export function createAcpxPackageJsonResolver(
       "ACPX provider package root must be an explicit normalized absolute path",
     );
   }
+  const manifest = (
+    providerPackageManifest ?? resolve(root, "package.json")
+  ).trim();
+  if (
+    !manifest ||
+    !isAbsolute(manifest) ||
+    manifest.includes("\0") ||
+    resolve(manifest) !== manifest
+  ) {
+    throw new Error(
+      "ACPX provider package manifest must be an explicit normalized absolute path",
+    );
+  }
   const canonicalRoot = realpathSync(root);
+  const canonicalManifest = realpathSync(manifest);
+  if (!pathIsInside(canonicalRoot, canonicalManifest)) {
+    throw new Error(
+      "ACPX provider package manifest resolves outside the selected provider root",
+    );
+  }
   const canonicalNodeModules = realpathSync(
     resolve(canonicalRoot, "node_modules"),
   );
@@ -239,7 +259,7 @@ export function createAcpxPackageJsonResolver(
       "ACPX provider node_modules resolves outside the selected provider root",
     );
   }
-  const providerRequire = createRequire(resolve(root, "package.json"));
+  const providerRequire = createRequire(canonicalManifest);
   return (packageName) => {
     const packageJsonPath = realpathSync(
       providerRequire.resolve(`${packageName}/package.json`),
@@ -576,7 +596,10 @@ export async function verifyQualifiedAcpxInstallation(
 function defaultPackageJsonResolver(packageName: string): string {
   const providerPackageRoot = process.env.PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT;
   if (providerPackageRoot !== undefined) {
-    return createAcpxPackageJsonResolver(providerPackageRoot)(packageName);
+    return createAcpxPackageJsonResolver(
+      providerPackageRoot,
+      process.env.PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST,
+    )(packageName);
   }
   // Source-mode and direct runtimes still have a stable module URL. The
   // descriptor-backed runner sidecar always receives the explicit root above.
