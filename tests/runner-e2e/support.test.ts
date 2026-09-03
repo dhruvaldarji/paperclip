@@ -10,6 +10,7 @@ import { classifyFailure, shouldRetryFailure } from "./failure-classifier.js";
 import {
   assertIsolatedServerEnvironment,
   buildPaperclipServerEnvironment,
+  resolvePaperclipRemoteRunnerBinaryForHarness,
   resolvePaperclipRunnerBinaryForHarness,
   runnerE2EServerControlPaths,
 } from "./harness-env.js";
@@ -55,6 +56,9 @@ describe("runner E2E local binary resolution", () => {
   const localNativeExecution = runnerExecutionById(
     "core-compatibility.runner-codex.local.message-marker",
   );
+  const remoteNativeExecution = runnerExecutionById(
+    "core-compatibility.runner-acpx-claude.daytona.message-marker",
+  );
 
   it("uses the debug runner binary built by the E2E workflow", () => {
     expect(
@@ -81,6 +85,33 @@ describe("runner E2E local binary resolution", () => {
         "linux",
       ),
     ).toBe("/custom/paperclip-runnerd");
+  });
+
+  it("uses and stages the same build-once binary for remote native cells", () => {
+    const runnerBinary = resolvePaperclipRunnerBinaryForHarness(
+      [remoteNativeExecution],
+      "/repository",
+      undefined,
+      "linux",
+    );
+    expect(runnerBinary).toBe(
+      path.join(
+        "/repository",
+        "packages/paperclip-runner/runner/target/debug/paperclip-runnerd",
+      ),
+    );
+    expect(
+      resolvePaperclipRemoteRunnerBinaryForHarness(
+        [remoteNativeExecution],
+        runnerBinary,
+      ),
+    ).toBe(runnerBinary);
+    expect(
+      resolvePaperclipRemoteRunnerBinaryForHarness(
+        [localNativeExecution],
+        runnerBinary,
+      ),
+    ).toBeUndefined();
   });
 });
 

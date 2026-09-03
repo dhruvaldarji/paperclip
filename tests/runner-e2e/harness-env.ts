@@ -42,7 +42,7 @@ export function runnerE2EServerControlPaths(temporaryRoot: string) {
 }
 
 /**
- * Local native cells use the debug binary produced by build:runner-binaries.
+ * Native cells use the debug binary produced once by build:runner-binaries.
  * Preserve an explicit override for release builds and developer workflows.
  */
 export function resolvePaperclipRunnerBinaryForHarness(
@@ -53,11 +53,7 @@ export function resolvePaperclipRunnerBinaryForHarness(
 ): string | undefined {
   if (configuredPath?.trim()) return configuredPath;
   if (
-    !executions.some(
-      (execution) =>
-        execution.environment.id === "local" &&
-        execution.profile.generation === "native",
-    )
+    !executions.some((execution) => execution.profile.generation === "native")
   ) {
     return undefined;
   }
@@ -71,6 +67,24 @@ export function resolvePaperclipRunnerBinaryForHarness(
     "debug",
     platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd",
   );
+}
+
+/**
+ * Remote native cells stage the same controller-owned binary whose digest is
+ * authorized by the PRP control plane. Local cells launch it directly.
+ */
+export function resolvePaperclipRemoteRunnerBinaryForHarness(
+  executions: readonly MatrixExecution[],
+  runnerBinary: string | undefined,
+): string | undefined {
+  if (!runnerBinary) return undefined;
+  return executions.some(
+    (execution) =>
+      execution.profile.generation === "native" &&
+      execution.environment.expectedExecutionTarget.kind === "remote",
+  )
+    ? runnerBinary
+    : undefined;
 }
 
 /**
