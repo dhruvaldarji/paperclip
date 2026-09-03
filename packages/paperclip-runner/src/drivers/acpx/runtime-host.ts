@@ -664,15 +664,20 @@ export class AcpxRuntimeHost {
         // a root that is still in use. A retried close reaches this release
         // once shutdown succeeds.
         await releaseAcpxRuntimeSandboxRootClaim(this.#sandbox);
+        // Mark the host closed only once the claim release itself has also
+        // succeeded. Marking it closed on a failed release would make a
+        // retried close return early without ever reaching this release
+        // again, permanently pinning the marker even though every other
+        // resource has already shut down cleanly.
+        // Runtime, credential, and command ownership has been relinquished
+        // even when the provider never acknowledged turn cancellation.
+        // Preserve that cancellation error for this caller, but make later
+        // close calls idempotently observe the successfully closed host.
+        if (this.#activeTurn === activeTurn) this.#activeTurn = null;
+        this.#closed = true;
       } catch (error) {
         errors.push(error);
       }
-      // Runtime, credential, and command ownership has been relinquished even
-      // when the provider never acknowledged turn cancellation. Preserve that
-      // cancellation error for this caller, but make later close calls
-      // idempotently observe the successfully closed host.
-      if (this.#activeTurn === activeTurn) this.#activeTurn = null;
-      this.#closed = true;
     }
     if (errors.length > 0) {
       throw new AggregateError(errors, "ACPX runtime cleanup failed");

@@ -900,6 +900,48 @@ describe("ACPX runtime host", () => {
     await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not mark itself closed when releasing the sandbox claim fails, so a retry still reaches the release", async () => {
+    const fixture = await hostFixture();
+    const runtime = runtimePort();
+    // Hand the host a lookalike sandbox object holding the same real,
+    // prepared directories, but a distinct reference from the one
+    // `prepareAcpxRuntimeSandbox` registered as the claim's owner. The
+    // release call keys its ownership lookup on that exact reference, so
+    // this copy can never satisfy it: releasing through it always throws,
+    // deterministically, however many times it is retried.
+    const dependencies = fixture.dependencies({
+      openRuntime: async () => runtime,
+    });
+    dependencies.prepareSandbox = vi.fn(async (input) => ({
+      ...(await prepareAcpxRuntimeSandbox(input)),
+    }));
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-all",
+        environment: {
+          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}",
+        },
+      },
+      dependencies,
+    );
+
+    await expect(host.close({ reason: "first close" })).rejects.toThrow(
+      /cleanup failed/,
+    );
+    expect(runtime.close).toHaveBeenCalledOnce();
+
+    // The claim release failed, so this host must not consider itself
+    // closed: a retried close must still reach cleanup, not silently report
+    // success while the sandbox claim stays pinned forever.
+    await expect(host.close({ reason: "retry close" })).rejects.toThrow(
+      /cleanup failed/,
+    );
+    expect(runtime.close).toHaveBeenCalledTimes(2);
+  });
+
   it("scrubs credentials only after the exact pending runtime close resolves", async () => {
     const fixture = await hostFixture();
     let resolveRuntimeClose!: () => void;
