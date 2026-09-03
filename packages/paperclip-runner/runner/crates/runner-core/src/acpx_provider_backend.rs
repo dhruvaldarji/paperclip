@@ -1960,6 +1960,14 @@ mod tests {
         let directory = temporary_directory("suspension-fence-pending");
         let (provider_lifetime_fence_candidates, original_lifetime_fence) =
             reserve_provider_lifetime_fence();
+        let sidecar = directory.join("sidecar");
+        write_artifact(&sidecar, b"qualified sidecar", true);
+        let launch_profile = AcpxLaunchProfile {
+            authority_digest: format!("sha256:{}", "d".repeat(64)),
+            command: sidecar.clone(),
+            args: Vec::new(),
+            artifacts: vec![artifact(&sidecar)],
+        };
         let provider_descriptor: AcpxProviderDescriptor =
             serde_json::from_value(descriptor("codex")).unwrap();
         let operations = Vec::new();
@@ -1969,7 +1977,7 @@ mod tests {
             catalog_digest: authorized_tool_catalog_digest(&operations).unwrap(),
             operations,
         };
-        let launch_profile_digest = format!("sha256:{}", "d".repeat(64));
+        let launch_profile_digest = launch_profile.canonical_digest().unwrap();
         let mut state = AcpxDurableState::new(
             provider_descriptor.clone(),
             tool_set,
@@ -1992,7 +2000,7 @@ mod tests {
         state.provider_exit_unconfirmed = true;
         state.validate(&context(), &launch_profile_digest).unwrap();
 
-        let config = test_config(&directory, None);
+        let config = test_config(&directory, Some(launch_profile));
         let mut executor = AcpxCommandExecutor::with_runner_config(&directory, &config);
         executor.state = Some(state);
         let open_error = executor.open_session().unwrap_err();
