@@ -12,7 +12,7 @@ import {
 import { createServer, type Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { verifiedRuntimeExecutable } from "./verified-runtime-executable.js";
+import { verifiedRuntimeExecutableHandoff } from "./verified-runtime-executable.js";
 
 const MAX_CODEX_CREDENTIAL_BYTES = 256 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
@@ -1140,8 +1140,9 @@ async function runDirectorySyncHelper(directory: string): Promise<void> {
   }
   let child: ChildProcess;
   try {
+    const runtimeHandoff = verifiedRuntimeExecutableHandoff(3);
     child = spawn(
-      verifiedRuntimeExecutable(),
+      runtimeHandoff.executable,
       [
         "--input-type=module",
         "--eval",
@@ -1152,7 +1153,10 @@ async function runDirectorySyncHelper(directory: string): Promise<void> {
         // The helper imports only Node built-ins. Do not inherit loader hooks or
         // any credential-bearing process environment into the durability worker.
         env: {},
-        stdio: "ignore",
+        stdio:
+          runtimeHandoff.sourceFd === null
+            ? "ignore"
+            : ["ignore", "ignore", "ignore", runtimeHandoff.sourceFd],
         windowsHide: true,
       },
     );

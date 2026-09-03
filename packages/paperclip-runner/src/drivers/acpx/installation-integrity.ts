@@ -28,7 +28,7 @@ import type { Readable, Writable } from "node:stream";
 import type { QualifiedAcpxProfile } from "./qualified-profiles.js";
 import {
   VERIFIED_RUNTIME_EXECUTABLE_ENV,
-  verifiedRuntimeExecutable,
+  verifiedRuntimeExecutableHandoff,
 } from "./verified-runtime-executable.js";
 
 const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
@@ -132,7 +132,12 @@ const OWNER_FD = PROVIDER_RUNTIME_EXECUTABLE_FD + providerRuntimeExecutableCount
 const OWNERSHIP_FD = OWNER_FD + 1;
 const PROVIDER_EXIT_FD = OWNERSHIP_FD + 1;
 const CREDENTIAL_FENCE_FD_START = PROVIDER_EXIT_FD + 1;
+const VERIFIED_RUNTIME_FD = CREDENTIAL_FENCE_FD_START + 2;
 const dependencyAncestorFds = Array.from({ length: dependencyAncestorCount }, (_, index) => ${DEPENDENCY_ANCESTOR_FD_START} + index);
+const runtimeDescriptorMatch = /^\\/proc\\/self\\/fd\\/([0-9]+)$/.exec(runtimeExecutable);
+const runtimeDescriptorFd = runtimeDescriptorMatch === null ? null : Number.parseInt(runtimeDescriptorMatch[1], 10);
+if (runtimeDescriptorFd !== null && runtimeDescriptorFd !== VERIFIED_RUNTIME_FD) throw new Error("ACPX verified runtime descriptor is misplaced");
+if (runtimeDescriptorFd !== null) fs.fstatSync(runtimeDescriptorFd);
 let provider;
 let watchdog;
 let reaped = false;
@@ -179,7 +184,7 @@ const startProvider = () => {
         // The provider observes this guardian-owned pipe directly. Kernel EOF
         // therefore revokes it even when SIGKILL/OOM prevents our JS reap path.
         // It also inherits both quorum fences until that self-reap completes.
-        stdio: [0, 1, 2, ${COMMAND_SOURCE_FD}, ${COMMAND_DIRECTORY_FD}, ...dependencyAncestorFds, ...(providerRuntimeExecutableCount === 1 ? [PROVIDER_RUNTIME_EXECUTABLE_FD] : []), "pipe", PROVIDER_EXIT_FD, CREDENTIAL_FENCE_FD_START, CREDENTIAL_FENCE_FD_START + 1],
+        stdio: [0, 1, 2, ${COMMAND_SOURCE_FD}, ${COMMAND_DIRECTORY_FD}, ...dependencyAncestorFds, ...(providerRuntimeExecutableCount === 1 ? [PROVIDER_RUNTIME_EXECUTABLE_FD] : []), "pipe", PROVIDER_EXIT_FD, CREDENTIAL_FENCE_FD_START, CREDENTIAL_FENCE_FD_START + 1, ...(runtimeDescriptorFd === null ? [] : ["ignore", runtimeDescriptorFd])],
         windowsHide: true,
       },
     );
@@ -209,12 +214,17 @@ try {
   // its live identity if this guardian is killed before it can run its reap.
   // Its private owner pipe reaches kernel EOF on guardian death even while the
   // provider is stopped and unable to process its own guardian-loss callback.
+  const watchdogStdio = ["ignore", "ignore", "ignore", "pipe", "pipe"];
+  if (runtimeDescriptorFd !== null) {
+    while (watchdogStdio.length < runtimeDescriptorFd) watchdogStdio.push("ignore");
+    watchdogStdio.push(runtimeDescriptorFd);
+  }
   watchdog = spawn(runtimeExecutable, ["--eval", WATCHDOG_SOURCE], {
     cwd: process.cwd(),
     detached: false,
     env: {},
     shell: false,
-    stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+    stdio: watchdogStdio,
     windowsHide: true,
   });
   const watchdogOwnerPipe = watchdog.stdio[3];
@@ -1299,9 +1309,20 @@ function commandLease(
         ) {
           throw new Error("ACPX provider credential fence is invalid");
         }
-        const runtimeExecutable = verifiedRuntimeExecutable();
+        const runtimeTargetFd = guarded
+          ? providerExitFd + 3
+          : DEPENDENCY_ANCESTOR_FD_START +
+            dependencyAncestors.length +
+            providerRuntimeExecutableCount;
+        const runtimeHandoff =
+          verifiedRuntimeExecutableHandoff(runtimeTargetFd);
         const environment = sanitizedNodeEnvironment(options.env);
-        environment[VERIFIED_RUNTIME_EXECUTABLE_ENV] = runtimeExecutable;
+        if (runtimeHandoff.environmentValue === undefined) {
+          delete environment[VERIFIED_RUNTIME_EXECUTABLE_ENV];
+        } else {
+          environment[VERIFIED_RUNTIME_EXECUTABLE_ENV] =
+            runtimeHandoff.environmentValue;
+        }
         if (
           (providerRuntimeExecutable === null) !==
           (providerRuntimeEnvironmentVariable === null)
@@ -1315,7 +1336,7 @@ function commandLease(
             providerRuntimeEnvironmentVariable;
         }
         child = spawnChildProcess(
-          runtimeExecutable,
+          runtimeHandoff.executable,
           guarded
             ? [
                 // Keep resolved module URLs on the retained descriptor paths
@@ -1370,6 +1391,9 @@ function commandLease(
                   "pipe",
                   "pipe",
                   ...lifetime.credentialFenceFds,
+                  ...(runtimeHandoff.sourceFd === null
+                    ? []
+                    : [runtimeHandoff.sourceFd]),
                 ]
               : [
                   "pipe",
@@ -1381,6 +1405,9 @@ function commandLease(
                   ...(providerRuntimeExecutable === null
                     ? []
                     : [providerRuntimeExecutable.fd]),
+                  ...(runtimeHandoff.sourceFd === null
+                    ? []
+                    : [runtimeHandoff.sourceFd]),
                 ],
           },
         );
