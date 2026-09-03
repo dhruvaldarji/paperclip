@@ -21,6 +21,7 @@ import { createAcpxRecoveryBinding } from "./recovery-identity.js";
 import {
   prepareAcpxRuntimeSandbox,
   readAcpxRecoveryWorkspace,
+  releaseAcpxRuntimeSandboxRootClaim,
   removeOwnedAcpxRuntimeSandboxRoot,
 } from "./runtime-sandbox.js";
 
@@ -321,9 +322,7 @@ describe("ACPX runtime sandbox", () => {
 
     await removeOwnedAcpxRuntimeSandboxRoot(second);
 
-    await expect(readFile(credentialPath, "utf8")).resolves.toContain(
-      "first",
-    );
+    await expect(readFile(credentialPath, "utf8")).resolves.toContain("first");
     await expect(stat(first.root)).resolves.toBeDefined();
   });
 
@@ -341,9 +340,8 @@ describe("ACPX runtime sandbox", () => {
     // this file's, so the only state the second admission can observe is
     // whatever is on disk.
     vi.resetModules();
-    const secondProcess: typeof import("./runtime-sandbox.js") = await import(
-      "./runtime-sandbox.js"
-    );
+    const secondProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
     const second = await secondProcess.prepareAcpxRuntimeSandbox({
       binding: fixture.binding,
       agent: "codex",
@@ -352,10 +350,55 @@ describe("ACPX runtime sandbox", () => {
 
     await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(second);
 
-    await expect(readFile(credentialPath, "utf8")).resolves.toContain(
-      "first",
-    );
+    await expect(readFile(credentialPath, "utf8")).resolves.toContain("first");
     await expect(stat(first.root)).resolves.toBeDefined();
+  });
+
+  it("keeps a live cross-process admission's root when its owner closes and a later admission aborts", async () => {
+    const fixture = await sandboxFixture("codex");
+    const owner = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+
+    // A second Runner process starts with an empty in-process registry. Its
+    // claim on the same deterministic root is declined, since the first
+    // admission already owns the marker, but it still builds a live sandbox
+    // on the shared root and keeps using it.
+    vi.resetModules();
+    const sharingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    const sharedOccupant = await sharingProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(sharedOccupant.root).toBe(owner.root);
+    const credentialPath = join(sharedOccupant.agentHomeDirectory, "auth.json");
+    await writeFile(credentialPath, '{"owner":"shared-occupant"}\n');
+
+    // The owner admission reaches a live host and closes normally, in its
+    // own process. The shared occupant's durable lease is still on disk, so
+    // this must not free the marker for reclaim by a later admission.
+    await releaseAcpxRuntimeSandboxRootClaim(owner);
+
+    // A third Runner process claims the same deterministic root. If the
+    // owner's close had freed the marker, this admission would become the
+    // new owner and its own later abort would delete the shared occupant's
+    // still-live root.
+    vi.resetModules();
+    const laterProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    const later = await laterProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(later.root).toBe(owner.root);
+    await laterProcess.removeOwnedAcpxRuntimeSandboxRoot(later);
+
+    await expect(readFile(credentialPath, "utf8")).resolves.toContain(
+      "shared-occupant",
+    );
+    await expect(stat(owner.root)).resolves.toBeDefined();
   });
 });
 
