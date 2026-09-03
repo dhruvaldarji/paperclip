@@ -138,7 +138,7 @@ jobs:
           SELECT_ENVIRONMENT: ${{ inputs.environment }}
           SELECT_CASE: ${{ inputs.case }}
           SELECT_ID: ${{ inputs.id }}
-          MAX_PARALLEL: ${{ vars.RUNNER_E2E_MAX_PARALLEL || '100' }}
+          MAX_PARALLEL: ${{ vars.RUNNER_E2E_MAX_PARALLEL || '32' }}
         run: |
           set -euo pipefail
           args=(--matrix-json)
@@ -186,8 +186,8 @@ jobs:
           echo "matrix=$(jq -c '{include: .include}' <<< "$catalog_json")" >> "$GITHUB_OUTPUT"
           echo "needs_daytona=$(jq -r '.needsDaytona' <<< "$catalog_json")" >> "$GITHUB_OUTPUT"
           echo "execution_ids=$(jq -c '.executionIds' <<< "$catalog_json")" >> "$GITHUB_OUTPUT"
-          if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || [ "$MAX_PARALLEL" -gt 100 ]; then
-            echo "RUNNER_E2E_MAX_PARALLEL must be an integer from 1 through 100." >&2
+          if ! [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || [ "$MAX_PARALLEL" -gt 57 ]; then
+            echo "RUNNER_E2E_MAX_PARALLEL must be an integer from 1 through 57." >&2
             exit 1
           fi
           echo "max_parallel=$MAX_PARALLEL" >> "$GITHUB_OUTPUT"
@@ -297,7 +297,7 @@ jobs:
   test:
     name: ${{ matrix.executionId }}
     needs: [catalog, daytona_image]
-    runs-on: runs-on/fleet=paperclip-public-pr-x64/env=public-ci
+    runs-on: ubuntu-latest-m
     timeout-minutes: ${{ matrix.timeoutMinutes }}
     permissions:
       contents: read
