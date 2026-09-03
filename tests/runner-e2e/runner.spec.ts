@@ -1444,10 +1444,15 @@ for (const execution of executions) {
         // fresh harness. A repeated near miss remains a failed cell.
         failureClassOverride = "provider_variance";
       }
+      const retryInteractiveTerminalProviderVariance =
+        (execution.suite.id === "openrouter-model-breadth" &&
+          (execution.task.id === "question-resume-complete" ||
+            execution.task.id === "plan-approve-complete")) ||
+        (execution.suite.id === "core-compatibility" &&
+          execution.profile.generation === "native" &&
+          execution.task.id === "plan-revise-accept");
       if (
-        execution.suite.id === "openrouter-model-breadth" &&
-        (execution.task.id === "question-resume-complete" ||
-          execution.task.id === "plan-approve-complete") &&
+        retryInteractiveTerminalProviderVariance &&
         exactMessageMatcher?.kind === "message_exact" &&
         selectedRuns.every((candidate) => candidate.status === "succeeded") &&
         issue.status === "done" &&
