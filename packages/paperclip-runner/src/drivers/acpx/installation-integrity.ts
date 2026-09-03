@@ -4,7 +4,7 @@ import {
   type ChildProcess,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import {
   lstat,
   open,
@@ -21,6 +21,7 @@ import {
   isAbsolute,
   relative,
   resolve,
+  sep,
 } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
@@ -229,9 +230,37 @@ export function createAcpxPackageJsonResolver(
       "ACPX provider package root must be an explicit normalized absolute path",
     );
   }
+  const canonicalRoot = realpathSync(root);
+  const canonicalNodeModules = realpathSync(
+    resolve(canonicalRoot, "node_modules"),
+  );
+  if (!pathIsInside(canonicalRoot, canonicalNodeModules)) {
+    throw new Error(
+      "ACPX provider node_modules resolves outside the selected provider root",
+    );
+  }
   const providerRequire = createRequire(resolve(root, "package.json"));
-  return (packageName) =>
-    providerRequire.resolve(`${packageName}/package.json`);
+  return (packageName) => {
+    const packageJsonPath = realpathSync(
+      providerRequire.resolve(`${packageName}/package.json`),
+    );
+    if (!pathIsInside(canonicalNodeModules, packageJsonPath)) {
+      throw new Error(
+        `ACPX provider package ${packageName} resolves outside the selected provider root`,
+      );
+    }
+    return packageJsonPath;
+  };
+}
+
+function pathIsInside(root: string, candidate: string): boolean {
+  const candidateRelativePath = relative(root, candidate);
+  return (
+    candidateRelativePath !== "" &&
+    candidateRelativePath !== ".." &&
+    !candidateRelativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(candidateRelativePath)
+  );
 }
 
 export interface VerifiedAcpxInstallation {
@@ -409,11 +438,7 @@ export async function verifyQualifiedAcpxInstallation(
       throw new Error("Qualified ACPX runtime package omitted its version");
     }
     runtimePackageJsonPath = await realpath(
-      resolvePackageJsonFrom(
-        profile.agentRuntimePackage,
-        serverPackageJsonPath,
-        resolvePackageJson,
-      ),
+      resolvePackageJson(profile.agentRuntimePackage),
     );
     runtimePackage = await readPackageJson(
       runtimePackageJsonPath,
@@ -558,24 +583,6 @@ function defaultPackageJsonResolver(packageName: string): string {
   return createRequire(import.meta.url).resolve(`${packageName}/package.json`);
 }
 
-function resolvePackageJsonFrom(
-  packageName: string,
-  parentPackageJsonPath: string,
-  resolvePackageJson: AcpxPackageJsonResolver,
-): string {
-  try {
-    return resolvePackageJson(packageName);
-  } catch (primaryError) {
-    try {
-      return createRequire(parentPackageJsonPath).resolve(
-        `${packageName}/package.json`,
-      );
-    } catch {
-      throw primaryError;
-    }
-  }
-}
-
 async function readPackageJson(
   packageJsonPath: string,
   packageName: string,
@@ -631,11 +638,7 @@ async function verifyQualifiedRuntimeExecutable(input: {
   }
 
   const executablePackageJsonPath = await realpath(
-    resolvePackageJsonFrom(
-      QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageName,
-      input.runtimePackageJsonPath,
-      input.resolvePackageJson,
-    ),
+    input.resolvePackageJson(QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageName),
   );
   const executablePackage = await readPackageJson(
     executablePackageJsonPath,

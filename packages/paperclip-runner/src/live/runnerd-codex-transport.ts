@@ -1122,7 +1122,12 @@ function acpxProviderPackageRoot(sidecarScript: string): string {
       "runner_provider_package_root_incompatible: ACPX sidecar must use the provider package dist/cli layout",
     );
   }
-  return resolve(cliDirectory, "../..");
+  const sidecarPackageRoot = resolve(cliDirectory, "../..");
+  // A local source build consumes pnpm's workspace-owned node_modules tree.
+  // A deployed provider pack owns a closed node_modules tree at its own root.
+  return sidecarPackageRoot === packageRoot
+    ? resolve(packageRoot, "../..")
+    : sidecarPackageRoot;
 }
 
 function acpxRunnerLaunchProfile(
