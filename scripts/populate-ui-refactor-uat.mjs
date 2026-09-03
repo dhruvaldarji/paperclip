@@ -30,16 +30,23 @@ async function findOrCreateLabel(companyId, existingLabels, input) {
   return created;
 }
 
-async function createTask(companyId, projectId, key, input) {
-  return request(`/companies/${companyId}/issues`, {
+async function findOrCreateTask(companyId, projectId, existingTasks, key, input) {
+  const parentId = input.parentId ?? null;
+  const existing = existingTasks.find(
+    (task) => task.title === input.title && (task.parentId ?? null) === parentId,
+  );
+  if (existing) return existing;
+
+  const created = await request(`/companies/${companyId}/issues`, {
     method: "POST",
     body: JSON.stringify({
       projectId,
-      allowDuplicate: true,
       idempotencyKey: `ui-refactor-uat:${key}`,
       ...input,
     }),
   });
+  existingTasks.push(created);
+  return created;
 }
 
 async function ensureDocument(issueId, key, input) {
@@ -82,6 +89,10 @@ if (!project) {
   });
 }
 
+const existingTasks = await request(
+  `/companies/${company.id}/issues?projectId=${encodeURIComponent(project.id)}&limit=1000`,
+);
+
 const existingLabels = await request(`/companies/${company.id}/labels`);
 const labels = {};
 for (const input of [
@@ -94,7 +105,7 @@ for (const input of [
   labels[input.name] = label.id;
 }
 
-const blocker = await createTask(company.id, project.id, "blocker-contract", {
+const blocker = await findOrCreateTask(company.id, project.id, existingTasks, "blocker-contract", {
   title: "Confirm the API contract for bulk task updates",
   description: "A short, unassigned blocker used to verify relationship badges, blocked-state filtering, and task-detail navigation.",
   status: "todo",
@@ -102,7 +113,7 @@ const blocker = await createTask(company.id, project.id, "blocker-contract", {
   labelIds: [labels["UAT: needs decision"]],
 });
 
-const parent = await createTask(company.id, project.id, "parent-mixed-subtasks", {
+const parent = await findOrCreateTask(company.id, project.id, existingTasks, "parent-mixed-subtasks", {
   title: "Prepare the populated task-list experience for design review",
   description: "Parent task with mixed-state subtasks. Use this task to verify the Subtasks tab, progress summary, relation rows, long chat layout, and task-detail Back behavior.",
   status: "in_progress",
@@ -115,7 +126,7 @@ const parent = await createTask(company.id, project.id, "parent-mixed-subtasks",
 const tasks = [
   blocker,
   parent,
-  await createTask(company.id, project.id, "critical-blocked-long-title", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "critical-blocked-long-title", {
     title: "Resolve the blocked checkout experience across a deliberately long task title without hiding status, priority, ownership, or relationship metadata",
     description: "This row is intentionally dense. Confirm truncation is graceful and that the critical priority, blocked state, labels, assignee, and blocker remain understandable.",
     status: "blocked",
@@ -128,7 +139,7 @@ const tasks = [
     },
     labelIds: [labels["UAT: customer impact"], labels["UAT: needs decision"]],
   }),
-  await createTask(company.id, project.id, "in-review", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "in-review", {
     title: "Review the shared Inbox and Tasks row presentation",
     description: "Use this item to inspect the in-review state in list and Kanban views.",
     status: "in_review",
@@ -136,20 +147,20 @@ const tasks = [
     assigneeUserId: "local-board",
     labelIds: [labels["UAT: frontend"]],
   }),
-  await createTask(company.id, project.id, "todo-no-subtasks", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "todo-no-subtasks", {
     title: "Verify a task with no subtasks",
     description: "This task intentionally has no children. Use it to validate the requested conditional Subtasks-tab behavior and the replacement entry point for adding the first subtask.",
     status: "todo",
     priority: "medium",
     labelIds: [labels["UAT: quick win"]],
   }),
-  await createTask(company.id, project.id, "backlog-unassigned", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "backlog-unassigned", {
     title: "Explore an unassigned backlog task with minimal metadata",
     description: null,
     status: "backlog",
     priority: "low",
   }),
-  await createTask(company.id, project.id, "done-metadata", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "done-metadata", {
     title: "Document the first-pass information architecture decisions",
     description: "Completed item with multiple labels and a billing code for metadata-density review.",
     status: "done",
@@ -158,7 +169,7 @@ const tasks = [
     billingCode: "UAT-IA",
     labelIds: [labels["UAT: frontend"], labels["UAT: quick win"]],
   }),
-  await createTask(company.id, project.id, "cancelled", {
+  await findOrCreateTask(company.id, project.id, existingTasks, "cancelled", {
     title: "Retire the duplicate navigation experiment",
     description: "Cancelled item included to test muted row treatment and status filtering.",
     status: "cancelled",
@@ -193,7 +204,7 @@ for (const child of [
   },
 ]) {
   const { key, ...childInput } = child;
-  tasks.push(await createTask(company.id, project.id, key, {
+  tasks.push(await findOrCreateTask(company.id, project.id, existingTasks, key, {
     parentId: parent.id,
     description: `Synthetic ${child.status.replace("_", " ")} subtask for task-detail and progress-summary UAT.`,
     ...childInput,
