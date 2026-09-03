@@ -10,6 +10,7 @@ import { runnerE2EServerControlPaths } from "./harness-env.js";
 import { setupLiveFixtures, type LiveFixtureValues } from "./live-fixtures.js";
 import { evaluateMatcher, type MatcherResult } from "./matchers.js";
 import {
+  acceptedPlanSessionResetFailures,
   isControlPlaneGovernedResponseWait,
   isNonExecutingReviewFenceRun,
   numberedPlanStepCount,
@@ -1540,6 +1541,16 @@ for (const execution of executions) {
               invariantFailures.push(
                 "expected ACPX to record provider session identity across all heartbeat runs",
               );
+              continue;
+            }
+            const acceptedPlanResetFailures =
+              acceptedPlanSessionResetFailures(
+                "acpx",
+                previousSessionId,
+                current,
+              );
+            if (acceptedPlanResetFailures) {
+              invariantFailures.push(...acceptedPlanResetFailures);
               continue;
             }
             if (previousSessionId === currentSessionId) continue;

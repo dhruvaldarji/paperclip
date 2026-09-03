@@ -8,6 +8,7 @@ import { RunnerApi } from "./api.js";
 import { FixtureRegistry } from "./fixture-registry.js";
 import { classifyFailure, shouldRetryFailure } from "./failure-classifier.js";
 import {
+  acceptedPlanSessionResetFailures,
   assertIsolatedServerEnvironment,
   buildPaperclipServerEnvironment,
   resolvePaperclipRunnerBinaryForHarness,
@@ -415,6 +416,24 @@ describe("runner E2E run observations", () => {
     ).toEqual([
       "expected codex to preserve its provider session for run resumed",
     ]);
+    expect(
+      acceptedPlanSessionResetFailures(
+        "acpx",
+        initial.sessionIdAfter,
+        acceptedPlan,
+      ),
+    ).toEqual([]);
+    expect(
+      acceptedPlanSessionResetFailures("acpx", initial.sessionIdAfter, {
+        ...acceptedPlan,
+        sessionIdBefore: initial.sessionIdAfter,
+      }),
+    ).toEqual([
+      "expected accepted Plan run accepted-plan to start without a prior provider session",
+    ]);
+    expect(
+      acceptedPlanSessionResetFailures("acpx", initial.sessionIdAfter, resumed),
+    ).toBeNull();
   });
 });
 

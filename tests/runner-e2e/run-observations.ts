@@ -15,6 +15,37 @@ export interface ObservableProviderSessionRun {
   contextSnapshot?: Record<string, unknown> | null;
 }
 
+export function acceptedPlanSessionResetFailures(
+  provider: "codex" | "opencode" | "acpx",
+  previousSessionId: string | null | undefined,
+  current: ObservableProviderSessionRun,
+): string[] | null {
+  const context = record(current.contextSnapshot);
+  const acceptedPlanReset =
+    context.forceFreshSession === true &&
+    context.workspaceRefreshReason === "accepted_plan_confirmation" &&
+    context.source === "issue.interaction.accept" &&
+    context.interactionStatus === "accepted";
+  if (!acceptedPlanReset) return null;
+
+  const failures: string[] = [];
+  if (current.sessionIdBefore) {
+    failures.push(
+      `expected accepted Plan run ${current.id} to start without a prior provider session`,
+    );
+  }
+  if (
+    previousSessionId &&
+    current.sessionIdAfter &&
+    current.sessionIdAfter === previousSessionId
+  ) {
+    failures.push(
+      `expected accepted Plan run ${current.id} to rotate the ${provider} provider session`,
+    );
+  }
+  return failures;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -89,23 +120,13 @@ export function providerSessionContinuityFailures(
     if (index === 0) continue;
 
     const previousSessionId = runs[index - 1]?.sessionIdAfter;
-    const context = record(current.contextSnapshot);
-    const acceptedPlanReset =
-      context.forceFreshSession === true &&
-      context.workspaceRefreshReason === "accepted_plan_confirmation" &&
-      context.source === "issue.interaction.accept" &&
-      context.interactionStatus === "accepted";
-    if (acceptedPlanReset) {
-      if (current.sessionIdBefore) {
-        failures.push(
-          `expected accepted Plan run ${current.id} to start without a prior provider session`,
-        );
-      }
-      if (previousSessionId && currentSessionId === previousSessionId) {
-        failures.push(
-          `expected accepted Plan run ${current.id} to rotate the ${provider} provider session`,
-        );
-      }
+    const acceptedPlanResetFailures = acceptedPlanSessionResetFailures(
+      provider,
+      previousSessionId,
+      current,
+    );
+    if (acceptedPlanResetFailures) {
+      failures.push(...acceptedPlanResetFailures);
       continue;
     }
 
