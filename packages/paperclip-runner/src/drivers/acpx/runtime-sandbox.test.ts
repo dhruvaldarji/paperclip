@@ -604,6 +604,69 @@ describe("ACPX runtime sandbox", () => {
     expect(sandbox.root).toBe(probe.root);
     await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
   });
+
+  it("never clobbers a fresh gate that claims the path while a captured gate's restore is in flight", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    await writeFile(gatePath, String(deadHolder.pid), { flag: "wx" });
+
+    vi.resetModules();
+    const recoveringProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    // Recovery captures the dead gate under a private path, then finds the
+    // captured bytes do not match — a first replacement already claimed
+    // the shared path before the capture ran — and moves to put that
+    // captured file back. Claim the shared path a second time in the exact
+    // gap before that restore runs, simulating a third admission that beat
+    // the restore to the path. The restore must back off, never overwrite
+    // this second replacement with the stale copy it is holding.
+    const firstReplacementContents = `${process.pid}:first-replacement`;
+    const secondReplacementContents = `${process.pid}:second-replacement`;
+    const recovered = recoveringProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        beforeStaleGateRemoval: async () => {
+          await unlink(gatePath);
+          await writeFile(gatePath, firstReplacementContents, {
+            flag: "wx",
+          });
+        },
+        beforeStaleGateRestore: async () => {
+          // Recovery already renamed the shared path away to capture the
+          // first replacement, so nothing sits at `gatePath` right now.
+          await writeFile(gatePath, secondReplacementContents, {
+            flag: "wx",
+          });
+        },
+      },
+    );
+
+    await waitForConcurrentClaimHeadStart();
+    // Finding anything other than this exact marker proves the restore
+    // overwrote the gate that claimed the path after it.
+    await expect(readFile(gatePath, "utf8")).resolves.toBe(
+      secondReplacementContents,
+    );
+
+    // Free the second replacement gate, as its own holder would on
+    // completing its claim, so the still-retrying recovery call above can
+    // proceed.
+    await unlink(gatePath);
+
+    const sandbox = await recovered;
+    expect(sandbox.root).toBe(probe.root);
+    await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
 });
 
 async function sandboxFixture(agent: "pi" | "claude" | "codex") {
