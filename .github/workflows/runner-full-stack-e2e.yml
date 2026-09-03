@@ -353,6 +353,7 @@ jobs:
           python3 <<'PY'
           import json
           import os
+          import re
           import select
           import shutil
           import subprocess
@@ -446,6 +447,23 @@ jobs:
               )
           if opened.get("ok") is not True:
               message = str(opened.get("error", {}).get("message", ""))
+              safe_message = message
+              for key, value in environment.items():
+                  if value and any(
+                      marker in key.upper()
+                      for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
+                  ):
+                      safe_message = safe_message.replace(value, "[ENV_SECRET]")
+              safe_message = re.sub(
+                  r"(?i)(bearer\s+|sk-)[A-Za-z0-9._-]+",
+                  r"\1[REDACTED]",
+                  safe_message,
+              )
+              safe_message = re.sub(
+                  r"/(?:home|tmp)/[^\s'\"]+",
+                  "[PATH]",
+                  safe_message,
+              )
               probes = [
                   "ENOENT", "EACCES", "EPERM", "memfd", "deleted", "lstat",
                   "guardian", "ownership", "handshake", "credential", "fence",
@@ -458,6 +476,7 @@ jobs:
                   "messageDigest": __import__("hashlib").sha256(
                       message.encode("utf8")
                   ).hexdigest(),
+                  "safeMessage": safe_message[:2_000],
                   "classifiers": [
                       probe for probe in probes if probe.lower() in message.lower()
                   ],
