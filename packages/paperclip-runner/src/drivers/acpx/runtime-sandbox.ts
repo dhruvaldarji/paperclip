@@ -133,11 +133,15 @@ const ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS = 1_000;
 // stale-gate recovery attempts for one gate across every Runner process. See
 // `withAcpxRuntimeSandboxRootGateRecoveryLock`.
 const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_SUFFIX = ".recovering";
-// One recovery attempt only runs local filesystem calls, never blocking I/O
-// on another process, so it always finishes well inside this bound. A lock
-// still held past it can only mean its own holder crashed mid-recovery; a
-// later attempt then clears it, instead of leaving every admission for this
-// root to wait out the full gate acquire timeout.
+// A recovery lock's holder pid proves whether that holder is still alive,
+// the same way `breakStaleAcpxRuntimeSandboxRootGate` proves a gate's holder
+// is dead before it removes the gate. See
+// `breakStaleAcpxRuntimeSandboxRootGateRecoveryLock`. A lock can still carry
+// no readable pid, the same way a gate can: this bound is then the
+// fallback, and it guards only that case. A lock never names the shared
+// path before its holder pid is staged and published in one atomic step, so
+// a lock this old with no readable pid did not lose a race with a slow
+// write. Its content was lost or damaged after publication instead.
 const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS = 5_000;
 // Infix for the private path a recovery lock holder pins its own lock
 // instance under for as long as it holds the lock. Distinct from
@@ -1105,44 +1109,72 @@ async function reclaimAcpxRuntimeSandboxRootGateCapture(
 // `breakStaleAcpxRuntimeSandboxRootGateRecoveryLock` for how the lock's own
 // stale-break stays safe under a second, concurrent admission.
 //
-// The lock itself only guards a short run of local filesystem calls, never
-// blocking I/O on another process, so a live lock holder always finishes
-// well inside `ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS`. A lock still
-// held past that age can only mean its own holder crashed mid-recovery;
-// this call then breaks it so a later attempt is not blocked forever by a
-// lock its own holder can never release — see
-// `breakStaleAcpxRuntimeSandboxRootGateRecoveryLock` for why that break must
-// remove only the exact lock instance this call observed, never a
-// replacement a later admission has since acquired.
+// A live lock holder can take longer than any fixed bound to finish: its
+// recovery pass runs only local filesystem calls, but a slow disk can still
+// stretch those calls well past a short deadline, the same way a slow disk
+// can stretch a gate holder's own write (see `acquireAcpxRuntimeSandboxRootGate`).
+// So this lock proves staleness the same way `breakStaleAcpxRuntimeSandboxRootGate`
+// proves a gate's holder is dead: by the holder pid the lock names, checked
+// for life, never by how long the lock has existed. A holder that is still
+// running keeps its lock no matter how old it looks — only a holder pid
+// that is provably gone lets a later attempt break the lock, so a later
+// attempt is not blocked forever by a lock its own holder can never
+// release. See `breakStaleAcpxRuntimeSandboxRootGateRecoveryLock` for that
+// check, and for why the break it runs must remove only the exact lock
+// instance it observed, never a replacement a later admission has since
+// acquired.
 async function withAcpxRuntimeSandboxRootGateRecoveryLock(
   gatePath: string,
   dependencies: AcpxRuntimeSandboxRootGateDependencies,
   recovery: () => Promise<void>,
 ): Promise<void> {
   const lockPath = `${gatePath}${ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_SUFFIX}`;
-  let handle: FileHandle;
+  const stagingPath = `${lockPath}${ACPX_SANDBOX_ROOT_GATE_STAGE_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
+  // The holder pid, plus a random per-acquisition token, staged in full
+  // before this lock ever names the shared path — the same technique
+  // `acquireAcpxRuntimeSandboxRootGate` uses for the gate itself, and for
+  // the same reason: a lock created empty directly at the shared path would
+  // let a concurrent break call read it before its pid is written, with no
+  // way to tell that gap apart from a lock whose holder crashed before it
+  // ever wrote one.
+  const content = `${process.pid}:${randomBytes(16).toString("hex")}`;
+  const stagingHandle = await open(
+    stagingPath,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      (constants.O_NOFOLLOW ?? 0),
+    PRIVATE_FILE_MODE,
+  );
   try {
-    handle = await open(
-      lockPath,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        (constants.O_NOFOLLOW ?? 0),
-      PRIVATE_FILE_MODE,
-    );
-  } catch (error) {
-    if (errorCode(error) !== "EEXIST") throw error;
-    // Another admission is already recovering this gate. Break the lock
-    // only once it is provably stale, and either way, back off for this
-    // call: attempting the gate's own recovery here too is exactly the race
-    // this lock exists to prevent. A lock broken here lets the NEXT retry in
-    // `withAcpxRuntimeSandboxRootGate`'s loop acquire it cleanly, instead of
-    // this call racing a second recovery attempt into the same gate.
-    await breakStaleAcpxRuntimeSandboxRootGateRecoveryLock(
-      lockPath,
-      dependencies,
-    );
-    return;
+    await stagingHandle.chmod(PRIVATE_FILE_MODE);
+    await stagingHandle.writeFile(content, "utf8");
+    await stagingHandle.sync();
+  } finally {
+    await stagingHandle.close();
+  }
+  try {
+    try {
+      await link(stagingPath, lockPath);
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+      // Another admission is already recovering this gate. Break the lock
+      // only once it is provably stale, and either way, back off for this
+      // call: attempting the gate's own recovery here too is exactly the
+      // race this lock exists to prevent. A lock broken here lets the NEXT
+      // retry in `withAcpxRuntimeSandboxRootGate`'s loop acquire it
+      // cleanly, instead of this call racing a second recovery attempt into
+      // the same gate.
+      await breakStaleAcpxRuntimeSandboxRootGateRecoveryLock(
+        lockPath,
+        dependencies,
+      );
+      return;
+    }
+  } finally {
+    await unlink(stagingPath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
   }
   // Pin this exact lock instance under a private path this holder alone
   // controls, for as long as it holds the lock. A plain device-and-inode
@@ -1158,14 +1190,8 @@ async function withAcpxRuntimeSandboxRootGateRecoveryLock(
   // private name, so no break or release anywhere else in this file ever
   // touches it, and only this holder's own release removes it.
   const ownPinPath = `${lockPath}${ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_PIN_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
-  let ownEntry: BigIntStats;
-  try {
-    await handle.chmod(PRIVATE_FILE_MODE);
-    await link(lockPath, ownPinPath);
-    ownEntry = await lstat(ownPinPath, { bigint: true });
-  } finally {
-    await handle.close();
-  }
+  await link(lockPath, ownPinPath);
+  const ownEntry = await lstat(ownPinPath, { bigint: true });
   try {
     await dependencies.afterRecoveryLockAcquired?.();
     await recovery();
@@ -1263,10 +1289,12 @@ async function releaseAcpxRuntimeSandboxRootGateRecoveryLock(
 
 // Removes a stale-gate recovery lock left behind by an attempt that crashed
 // mid-recovery, so a lock its own holder can never release does not block
-// every later admission for this root forever.
+// every later admission for this root forever. Never removes a lock whose
+// holder is still alive, however long that holder's recovery pass runs —
+// see `withAcpxRuntimeSandboxRootGateRecoveryLock`.
 //
 // A plain `stat`-then-`unlink` cannot break the lock safely: whatever this
-// call reads to judge its age, a later, separate `unlink` call still removes
+// call reads to judge it, a later, separate `unlink` call still removes
 // whatever the path names at that later moment, not what this call read. If
 // the observed holder finishes and releases its lock in that exact gap, and
 // a fresh admission then wins the now-vacant path with its own new recovery
@@ -1277,17 +1305,22 @@ async function releaseAcpxRuntimeSandboxRootGateRecoveryLock(
 // bug already fixed once, on the gate file itself.
 //
 // This call instead pins whatever currently occupies `lockPath` with an
-// extra `link` first, so the shared path is never vacated while it judges
-// the pinned copy's age. Only once that pinned copy is old enough that its
-// own holder must have crashed mid-recovery does this call remove the lock
-// — and even then, only by capturing whatever the shared path names with one
-// atomic `rename`, then comparing what it caught against the pinned
-// identity: a match proves it caught the same lock it already judged stale,
-// safe to delete for good. A mismatch means a fresh attempt already won the
-// lock in the gap between the pin and this removal, so this call restores it
-// immediately with `link`, not `rename` — `link` fails instead of silently
-// overwriting a further attempt that has since taken the momentarily empty
-// path first.
+// extra `link` first, so the shared path is never vacated while it reads
+// the pinned copy's holder pid. It proves the holder dead the same way
+// `breakStaleAcpxRuntimeSandboxRootGate` proves a gate's own holder dead:
+// by checking that pid for life, never by how long the lock has existed —
+// a lock a live holder still owns keeps that holder's exclusivity no matter
+// how slow its recovery pass runs. Only a lock with no readable pid falls
+// back to age, guarded by `ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS`.
+// Only once this call has proved the pinned copy's holder gone does it
+// remove the lock — and even then, only by capturing whatever the shared
+// path names with one atomic `rename`, then comparing what it caught
+// against the pinned identity: a match proves it caught the same lock it
+// already judged dead, safe to delete for good. A mismatch means a fresh
+// attempt already won the lock in the gap between the pin and this removal,
+// so this call restores it immediately with `link`, not `rename` — `link`
+// fails instead of silently overwriting a further attempt that has since
+// taken the momentarily empty path first.
 async function breakStaleAcpxRuntimeSandboxRootGateRecoveryLock(
   lockPath: string,
   dependencies: AcpxRuntimeSandboxRootGateDependencies,
@@ -1302,11 +1335,29 @@ async function breakStaleAcpxRuntimeSandboxRootGateRecoveryLock(
   }
   try {
     const pinnedEntry = await lstat(capturePath, { bigint: true });
-    const ageMs = Date.now() - Number(pinnedEntry.mtimeMs);
-    if (ageMs < ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS) {
-      // Young enough that its own holder could still legitimately be
-      // mid-recovery: leave it alone.
+    let holderPid: number | null;
+    try {
+      const bytes = await readFile(capturePath);
+      const contents = bytes.toString("utf8").trim();
+      const parsed = Number.parseInt(contents, 10);
+      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      // Unreadable: nothing provable to break here.
       return;
+    }
+    if (holderPid !== null) {
+      if (isAcpxSandboxRootGateHolderAlive(holderPid)) {
+        // Still alive, however long its recovery pass takes: leave it
+        // alone.
+        return;
+      }
+    } else {
+      // Empty or malformed: no pid to check. Wait out the grace period
+      // instead, so a holder still writing its pid keeps its lock.
+      const ageMs = Date.now() - Number(pinnedEntry.mtimeMs);
+      if (ageMs < ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS) {
+        return;
+      }
     }
     await dependencies.afterRecoveryLockStaleCapture?.();
     const removalPath = `${lockPath}${ACPX_SANDBOX_ROOT_GATE_REAP_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
@@ -1318,12 +1369,22 @@ async function breakStaleAcpxRuntimeSandboxRootGateRecoveryLock(
       throw error;
     }
     const capturedEntry = await lstat(removalPath, { bigint: true });
-    if (
+    const isSameLock =
       capturedEntry.dev === pinnedEntry.dev &&
-      capturedEntry.ino === pinnedEntry.ino
-    ) {
+      capturedEntry.ino === pinnedEntry.ino;
+    // The pin's only job is keeping `pinnedEntry`'s inode number from being
+    // freed and reused while this call still needs it for the identity
+    // compare above. That compare is now done, so release the pin here,
+    // before the removal or restore below, rather than waiting for this
+    // call to return — a pin held open past this point would leave a
+    // private `.reap-` name for the lock visible even after the shared path
+    // itself already shows this call's final, settled state.
+    await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+    if (isSameLock) {
       // The rename caught the exact stale lock this call already judged
-      // old: safe to delete for good.
+      // dead: safe to delete for good.
       await unlink(removalPath).catch((error) => {
         if (errorCode(error) !== "ENOENT") throw error;
       });

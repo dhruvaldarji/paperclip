@@ -1371,17 +1371,21 @@ describe("ACPX runtime sandbox", () => {
     // removed the live replacement lock instead of leaving it alone. This
     // call reaches that decision through several real filesystem calls
     // after the head start above, so this polls for it rather than
-    // assuming the head start alone was enough time.
+    // assuming the head start alone was enough time. The break's own
+    // restore is itself two separate filesystem calls (link, then unlink
+    // of its own private capture name), so this also polls for that
+    // private name to be gone, rather than asserting on it the instant the
+    // content alone settles.
     await waitForAcpxSandboxGateState(async () => {
       await expect(readFile(recoveryLockPath, "utf8")).resolves.toBe(
         replacementLockContents,
       );
+      expect(
+        (await readdir(dirname(gatePath))).filter((entry) =>
+          entry.includes(".recovering.reap-"),
+        ),
+      ).toHaveLength(0);
     });
-    expect(
-      (await readdir(dirname(gatePath))).filter((entry) =>
-        entry.includes(".recovering.reap-"),
-      ),
-    ).toHaveLength(0);
     // The dead gate itself was never touched: this admission backed off
     // once it found a replacement lock, instead of racing its own recovery
     // of the gate underneath the replacement's holder.
@@ -1517,7 +1521,7 @@ describe("ACPX runtime sandbox", () => {
     await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
   });
 
-  it("never removes a replacement recovery lock after a live recovery's own lock is wrongly broken as stale", async () => {
+  it("never breaks a live recovery lock however old it looks under the clock, as long as its holder is alive", async () => {
     const fixture = await sandboxFixture("codex");
     const probe = await prepareAcpxRuntimeSandbox({
       binding: fixture.binding,
@@ -1550,70 +1554,60 @@ describe("ACPX runtime sandbox", () => {
     await waitForAcpxSandboxGateState(async () => {
       await expect(stat(recoveryLockPath)).resolves.toBeDefined();
     });
+    const liveLockIdentity = await lstat(recoveryLockPath, { bigint: true });
 
     // A second admission finds the same dead gate and the first admission's
     // lock in its way. Move the clock forward past the recovery lock's own
-    // stale threshold before the second admission judges the lock's age, so
-    // it wrongly treats the first admission's still-live lock as abandoned
-    // by a crashed recoverer — the first admission has done nothing wrong;
-    // the lock is simply old enough by the mocked clock to look that way.
+    // stale threshold: this simulates a recovery pass that a slow disk has
+    // kept running past that bound. An age-only check would wrongly treat
+    // the first admission's still-live lock as abandoned; this call instead
+    // reads the holder pid the lock names and checks that pid for life, so
+    // it must leave the lock alone no matter how old it looks under the
+    // clock.
     const dateNowSpy = vi
       .spyOn(Date, "now")
       .mockReturnValue(Date.now() + 5_500);
-    vi.resetModules();
-    const secondProcess: typeof import("./runtime-sandbox.js") =
-      await import("./runtime-sandbox.js");
-    let releaseSecondLock: () => void = () => {};
-    const secondLockPaused = new Promise<void>((settle) => {
-      releaseSecondLock = settle;
-    });
-    // The second admission's first attempt at the lock is guaranteed to hit
-    // the first admission's still-present lock and go through a break
-    // attempt, since the first admission never releases before this signal
-    // fires — so reaching this seam again proves the second admission's own
-    // fresh acquisition, on its next retry, not a first-attempt success.
-    let markSecondLockAcquired: () => void = () => {};
-    const secondLockAcquired = new Promise<void>((settle) => {
-      markSecondLockAcquired = settle;
-    });
-    const secondRecovered = secondProcess.prepareAcpxRuntimeSandbox(
-      { binding: fixture.binding, agent: "codex" },
-      {
-        afterRecoveryLockAcquired: () => {
-          markSecondLockAcquired();
-          return secondLockPaused;
-        },
-      },
-    );
+    try {
+      vi.resetModules();
+      const secondProcess: typeof import("./runtime-sandbox.js") =
+        await import("./runtime-sandbox.js");
+      const secondRecovered = secondProcess.prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+      });
 
-    // The second admission breaks the first admission's real lock (it looks
-    // stale under the mocked clock) and, on its next retry, wins a fresh
-    // lock of its own at the same path — the replacement the first
-    // admission's own eventual release must not remove.
-    await secondLockAcquired;
-    dateNowSpy.mockRestore();
+      // Give the second admission's retry loop several real cycles against
+      // the mocked, far-future clock, so a wrongly broken lock has ample
+      // opportunity to show up here.
+      for (let cycle = 0; cycle < 8; cycle += 1) {
+        await waitForConcurrentClaimHeadStart();
+      }
+      const lockIdentityUnderMockedClock = await lstat(recoveryLockPath, {
+        bigint: true,
+      });
+      expect(lockIdentityUnderMockedClock.dev).toBe(liveLockIdentity.dev);
+      expect(lockIdentityUnderMockedClock.ino).toBe(liveLockIdentity.ino);
+      // The dead gate itself was never touched: the second admission is
+      // still waiting out the first admission's real, live recovery lock,
+      // not racing its own recovery of the same gate.
+      await expect(readFile(gatePath, "utf8")).resolves.toBe(
+        deadHolderContents,
+      );
 
-    // The first admission resumes now, unaware its own lock was already
-    // broken. It must never remove the second admission's live replacement
-    // lock when its own recovery finishes and it releases what it believes
-    // is still its own lock. The second admission is still paused and has
-    // not released its own lock itself, so the lock still being present
-    // right after the first admission's own recovery finishes proves the
-    // first admission's release left it alone.
-    releaseFirstLock();
-    const firstSandbox = await firstRecovered;
-    expect(firstSandbox.root).toBe(probe.root);
-    await expect(stat(recoveryLockPath)).resolves.toBeDefined();
+      // The first admission finishes its recovery for real and releases its
+      // lock normally. Only then can the second admission proceed, the same
+      // way any two admissions race a freshly recovered root.
+      releaseFirstLock();
+      const firstSandbox = await firstRecovered;
+      expect(firstSandbox.root).toBe(probe.root);
 
-    // The second admission now proceeds with its own recovery pass, using
-    // its still-intact replacement lock, and can claim the same, now-freed
-    // root for itself too.
-    releaseSecondLock();
-    const secondSandbox = await secondRecovered;
-    expect(secondSandbox.root).toBe(probe.root);
-
-    await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
-    await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(secondSandbox);
+      const secondSandbox = await secondRecovered;
+      expect(secondSandbox.root).toBe(probe.root);
+      await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
+      await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(secondSandbox);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 });
 
