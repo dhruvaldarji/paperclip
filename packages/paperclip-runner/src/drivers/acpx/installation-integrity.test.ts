@@ -499,6 +499,8 @@ describe("ACPX installation integrity", () => {
     ]);
     const profile = {
       ...resolveQualifiedAcpxProfile("claude", "claude-sonnet-5"),
+      agentRuntimePackage: null,
+      agentRuntimeVersion: null,
       commandDigest: `sha256:${createHash("sha256").update(command).digest("hex")}`,
     };
     const installation = await verifyQualifiedAcpxInstallation(
@@ -542,6 +544,8 @@ describe("ACPX installation integrity", () => {
       verifyQualifiedAcpxInstallation(
         {
           ...resolveQualifiedAcpxProfile("claude", "claude-sonnet-5"),
+          agentRuntimePackage: null,
+          agentRuntimeVersion: null,
           commandDigest: fixture.profile.commandDigest,
         },
         (packageName) =>
@@ -561,6 +565,9 @@ describe("ACPX installation integrity", () => {
       const installation = await verifyQualifiedAcpxInstallation(profile);
       expect(installation.agentServerPackageJsonPath).toContain(
         "/@agentclientprotocol/claude-agent-acp/package.json",
+      );
+      expect(installation.agentRuntimePackageJsonPath).toContain(
+        "/@anthropic-ai/claude-agent-sdk/package.json",
       );
       await (await installation.openCommand()).close();
     },
