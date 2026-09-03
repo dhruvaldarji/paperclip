@@ -101,9 +101,9 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it.each([["claude" as const, "claude-sonnet-5"]])(
+  it.each([["claude" as const, "claude-sonnet-5", "sonnet"]])(
     "opens the qualified %s session through the verified lease",
-    async (agent, model) => {
+    async (agent, model, providerModel) => {
       const runtime = fakeRuntime();
       const command = fakeCommand();
       const options = openOptions(command);
@@ -132,7 +132,7 @@ describe("Codex ACPX runtime adapter", () => {
       expect(runtime.ensureSession).toHaveBeenCalledWith(
         expect.objectContaining({
           agent,
-          sessionOptions: expect.objectContaining({ model }),
+          sessionOptions: expect.objectContaining({ model: providerModel }),
         }),
       );
     },

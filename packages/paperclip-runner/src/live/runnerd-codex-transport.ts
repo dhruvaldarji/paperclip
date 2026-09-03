@@ -1532,6 +1532,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #providerIdentity: Record<string, unknown> | null = null;
   #turnId = "";
   #turnStartResponsePending = false;
+  #turnStartResponseEpoch = 0;
   #durableTurnId = "";
   #authorizedTools: Record<string, unknown> | null = null;
   #closed = false;
@@ -2766,7 +2767,9 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       .join("\n");
     const pendingTurnId = `turn_lab_${randomUUID().replaceAll("-", "")}`;
     this.#turnId = pendingTurnId;
+    const responseEpoch = ++this.#turnStartResponseEpoch;
     this.#turnStartResponsePending = true;
+    let responseReady = false;
     try {
       await this.#command("turn.start", { text: message });
       // Command completion only means runnerd accepted the command. Codex assigns
@@ -2783,9 +2786,24 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       }
       if (this.#turnId === pendingTurnId)
         throw new Error("runnerd did not report the provider turn identity");
+      responseReady = true;
       return { turn: { id: this.#turnId, status: "inProgress" } };
     } finally {
-      this.#turnStartResponsePending = false;
+      if (!responseReady) {
+        if (this.#turnStartResponseEpoch === responseEpoch)
+          this.#turnStartResponsePending = false;
+      } else {
+        // Resolving this async method schedules the strict driver's response
+        // continuation as a microtask. Keep terminal frames held until the
+        // following task so the driver can bind and emit turn.accepted first.
+        // The epoch prevents a late release from clearing a newer turn fence.
+        const release = setTimeout(() => {
+          if (this.#turnStartResponseEpoch !== responseEpoch) return;
+          this.#turnStartResponsePending = false;
+          if (!this.#closed) this.#pumpEventsSafely();
+        }, 0);
+        release.unref();
+      }
     }
   }
 

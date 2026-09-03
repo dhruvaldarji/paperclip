@@ -419,7 +419,7 @@ describe("ACPX runtime host", () => {
     const fixture = await hostFixture();
     let selected = false;
     const setModel = vi.fn(async (model: string) => {
-      expect(model).toBe("claude-sonnet-5");
+      expect(model).toBe("sonnet");
       selected = true;
     });
     const runtime = runtimePort({

@@ -296,7 +296,11 @@ export async function openQualifiedAcpxRuntime(
         mode: "persistent",
         cwd: options.cwd,
         sessionOptions: {
-          model: options.profile.qualificationModel,
+          // ACP session construction receives the provider-native selector.
+          // The caller-facing canonical model was already pinned when the
+          // qualified profile was resolved and is restored at the status
+          // boundary after the provider reports this selector.
+          model: options.profile.reportedModelId,
           ...(options.systemInstructions
             ? { systemPrompt: { append: options.systemInstructions } }
             : {}),
