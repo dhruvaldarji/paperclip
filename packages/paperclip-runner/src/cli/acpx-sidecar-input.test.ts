@@ -131,10 +131,13 @@ describe("ACPX sidecar input sequencing", () => {
       detailCode: "AGENT_STARTUP_FAILED",
     });
     const genericStartup = Object.assign(new Error("provider exited"), {
-      code: "RUNTIME",
+      outputCode: "RUNTIME",
       detailCode: "AGENT_STARTUP_FAILED",
       stderrSummary: "Error [ERR_MODULE_NOT_FOUND]: package was not found",
       exitCode: 1,
+    });
+    const genericRuntime = Object.assign(new Error("provider rejected"), {
+      outputCode: "RUNTIME",
     });
     const nestedHandshake = new AggregateError(
       [
@@ -162,6 +165,7 @@ describe("ACPX sidecar input sequencing", () => {
     expect(acpxSidecarErrorCode(genericStartup)).toBe(
       "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
     );
+    expect(acpxSidecarErrorCode(genericRuntime)).toBe("RUNTIME");
     expect(acpxSidecarErrorCode(codedWrapper)).toBe(
       "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
     );
