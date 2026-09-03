@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, readFile, readlink, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readlink, rename, rm } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -71,6 +71,113 @@ export interface CopyBackCodexAuthInput {
   resolveCacheEntryPath?: (accountId: string) => Promise<string>;
   /** Environment for the cache off-switch read. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Identity of an open credential file: the device and inode its descriptor's
+ * own `fstat` reports, plus the inode's change time (`ctime`). `ctime`
+ * updates on every write to the file's own content, even one that keeps the
+ * same device and inode (an in-place truncate-and-rewrite), and no syscall
+ * lets a same-user process set `ctime` back to an earlier value the way
+ * `utimes` can forge `mtime` — so a mismatch on any one of the three fields
+ * proves the file changed since this identity was captured.
+ */
+interface CredentialFileIdentity {
+  readonly dev: number;
+  readonly ino: number;
+  readonly ctimeMs: number;
+}
+
+/**
+ * Opens the host credential with `O_NOFOLLOW`, then reads its bytes back
+ * through that SAME descriptor and returns the descriptor's own `fstat`
+ * identity alongside those bytes — one atomic open-then-read, so the bytes
+ * this hands to the merge decision and the identity checked later by
+ * {@link assertHostCredentialIdentityUnchanged} always describe the exact
+ * same file object, never two separate reads of a name a local process
+ * could repoint in between. Returns `undefined` when the host credential is
+ * genuinely absent (`ENOENT`); every other open or read error stays
+ * fail-loud, including a symbolic link at the credential's own path
+ * (`ELOOP`) — the shared host credential must always be a plain file.
+ */
+async function readHostCredentialSnapshot(
+  hostAuthFilePath: string,
+): Promise<{ bytes: Buffer; identity: CredentialFileIdentity } | undefined> {
+  let handle: FileHandle;
+  try {
+    handle = await open(hostAuthFilePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    const bytes = await handle.readFile();
+    return { bytes, identity: { dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs } };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Thrown only when the host credential FILE's identity no longer matches
+ * the identity {@link readHostCredentialSnapshot} captured when it fed the
+ * merge decision. The directory-identity checks elsewhere in this module
+ * prove the ENCLOSING DIRECTORY was not replaced; they say nothing about
+ * `auth.json` itself. A same-user process can replace it with a decoy right
+ * after the decision read, let the decision compare the sandbox copy
+ * against that decoy, then restore the original file before the write that
+ * follows — a restore that a directory-only identity check cannot see,
+ * because the directory itself never changed. A caller must not catch this
+ * as benign; it must stay fail-loud like every other unexpected write
+ * error.
+ */
+export class CopyBackCredentialReplacedError extends Error {
+  constructor() {
+    super(
+      "Codex auth copy-back: the host credential changed identity between the decision read and the write.",
+    );
+    this.name = "CopyBackCredentialReplacedError";
+  }
+}
+
+/**
+ * Compares a fresh, no-follow read of the host credential's identity against
+ * the identity {@link readHostCredentialSnapshot} captured when it fed the
+ * merge decision. A device, inode, or `ctime` mismatch — or the credential
+ * turning into a symbolic link, or existing now when it was absent then, or
+ * the reverse — all mean something replaced `auth.json` since the decision
+ * read it, so this rejects instead of letting the write below proceed on a
+ * decision made against a different file. Call this immediately before the
+ * write that follows, with no other `await` in between.
+ */
+async function assertHostCredentialIdentityUnchanged(
+  hostAuthFilePath: string,
+  expectedIdentity: CredentialFileIdentity | undefined,
+): Promise<void> {
+  let liveStat;
+  try {
+    liveStat = await lstat(hostAuthFilePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+      if (expectedIdentity !== undefined) {
+        throw new CopyBackCredentialReplacedError();
+      }
+      return;
+    }
+    throw error;
+  }
+  if (
+    expectedIdentity === undefined ||
+    liveStat.isSymbolicLink() ||
+    liveStat.dev !== expectedIdentity.dev ||
+    liveStat.ino !== expectedIdentity.ino ||
+    liveStat.ctimeMs !== expectedIdentity.ctimeMs
+  ) {
+    throw new CopyBackCredentialReplacedError();
+  }
 }
 
 /**
@@ -276,56 +383,71 @@ async function assertManagedCredentialAncestorsStillLive(
  *      `source`). The open uses `O_EXCL` so it fails instead of following or
  *      overwriting an existing entry, and `O_NOFOLLOW` so it refuses outright
  *      if the temp name is (or became) a symbolic link.
- *   5. On a non-Linux platform, snapshot the CURRENT host credential bytes
- *      into a second private temp file, immediately after one more identity
- *      re-check with no other `await` in between, and hand the predicate
- *      that frozen snapshot instead of the live host path — see the
- *      module-level note after this list for why. Then run the newer-wins
- *      decision predicate (`source` = sandbox temp, `destination` = host, or
- *      its non-Linux snapshot). Exit 10 → adopt the sandbox copy; exit 20 →
- *      keep the host copy.
- *   6. On exit 10, `rename` the staged temp over the host target, both
+ *   5. On every platform, snapshot the CURRENT host credential bytes into a
+ *      second private temp file, together with the identity
+ *      {@link readHostCredentialSnapshot} reads back from the very
+ *      descriptor it read those bytes through, and hand the predicate that
+ *      frozen snapshot instead of the live host path — see the module-level
+ *      note after this list for why. Then run the newer-wins decision
+ *      predicate (`source` = sandbox temp, `destination` = the snapshot).
+ *      Exit 10 → adopt the sandbox copy; exit 20 → keep the host copy.
+ *   6. On exit 10, re-verify the host credential's identity — device, inode,
+ *      and `ctime` — against the one step 5 captured, with no other `await`
+ *      in between; see {@link assertHostCredentialIdentityUnchanged}. Only
+ *      once that passes, `rename` the staged temp over the host target, both
  *      addressed through the pinned directory's descriptor alias. `rename`
  *      never follows a destination symbolic link — it replaces the link
  *      entry itself — so even a `hostAuthPath` swapped to a symbolic link in
  *      this window is overwritten in place, never written through. This is
  *      an atomic same-directory swap that preserves mode `0600`. On exit 20,
  *      discard the temp file.
- * The staged temp and, on a non-Linux platform, the destination snapshot are
- * always removed (rename consumes the staged temp on the copy path; the
- * finally cleans up both otherwise), so a failure never leaves a partial
- * file. Never logs token bytes — only the decision outcome.
+ * The staged temp and the destination snapshot are always removed (rename
+ * consumes the staged temp on the copy path; the finally cleans up both
+ * otherwise), so a failure never leaves a partial file. Never logs token
+ * bytes — only the decision outcome.
  *
  * The decision predicate (step 5) runs in a separate `node` child process, so
  * it cannot use this process's `/proc/self/fd` alias — `self` inside that
  * child would name the CHILD's own descriptor table, not this parent's. On
- * Linux the predicate's two read arguments instead name the pinned
+ * Linux the predicate's sandbox-side read argument instead names the pinned
  * descriptor through this parent process's real pid, `/proc/<pid>/fd/<fd>`, a
  * kernel-maintained record any process with the same user id can read — so
  * the read side resolves through the exact same pinned directory the write
  * side (step 4's create and step 6's `rename`) already uses, and a later swap
- * of the plain directory path text cannot make the two sides disagree.
+ * of the plain directory path text cannot make the two sides disagree. The
+ * predicate's destination-side read argument is the frozen snapshot from
+ * step 5, on every platform.
  *
- * On a non-Linux platform, where `/proc` does not exist, the predicate's read
- * of the sandbox temp still uses the plain, re-verified directory path text —
- * safe, because the temp's name is a value this function only just generated
- * with a random id, so a local process cannot pre-stage a decoy under that
- * exact name before this function creates the real one; substituting the
- * whole directory to defeat that name check breaks the temp lookup outright,
- * which the predicate treats as an unusable source and fails closed to
- * "keep destination". The predicate's read of the HOST credential is
- * different: `hostAuthPath` is a fixed, standing name a local process already
- * knows, so it cannot rely on an unguessable name the same way. Reading it
- * live, by plain path text, at whatever moment the predicate's own child
- * process happens to open it, would let a directory swap-and-restore around
- * that read compare the predicate against a decoy while the write side, re-
+ * On a non-Linux platform, the predicate's read of the sandbox temp still
+ * uses the plain, re-verified directory path text — safe, because the temp's
+ * name is a value this function only just generated with a random id, so a
+ * local process cannot pre-stage a decoy under that exact name before this
+ * function creates the real one; substituting the whole directory to defeat
+ * that name check breaks the temp lookup outright, which the predicate
+ * treats as an unusable source and fails closed to "keep destination".
+ *
+ * The predicate's read of the HOST credential is different in kind, on every
+ * platform: `hostAuthPath` is a fixed, standing name a local process already
+ * knows, so it cannot rely on an unguessable name the way the sandbox temp
+ * does. Reading it live, by name, at whatever moment the predicate's own
+ * child process happens to open it, would let a swap-and-restore around that
+ * read compare the predicate against a decoy while the write side, re-
  * verified right before the `rename`, ends up addressing the genuine,
- * restored directory — so the decision and the write would silently disagree
- * about which host credential they each saw. Step 5 above closes this by
- * reading the host credential itself, in this process, immediately next to
- * an identity re-check, and handing the predicate a frozen snapshot in place
- * of the live path — so a later directory swap-and-restore can no longer
- * change what the predicate reads, on either side.
+ * restored target — so the decision and the write would silently disagree
+ * about which host credential they each saw. This applies at two different
+ * levels: a non-Linux platform can have its ENCLOSING DIRECTORY swapped and
+ * restored around the read (a gap the pinned descriptor alone does not
+ * close there); on every platform, `auth.json` itself can be swapped and
+ * restored around the read without the enclosing directory ever changing
+ * identity at all — a gap no directory-identity check, on any platform, was
+ * ever positioned to see. Step 5 above closes both by reading the host
+ * credential itself, through an opened descriptor, immediately next to an
+ * `fstat` read of that same descriptor, and handing the predicate a frozen
+ * snapshot in place of the live path; step 6 then re-verifies that captured
+ * identity — not just the enclosing directory's — right before the write
+ * that follows, so a later swap-and-restore, of the directory or of the
+ * credential file alone, can no longer make the decision and the write
+ * silently disagree about which host credential they each saw.
  */
 export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<CopyBackCodexAuthOutcome> {
   const { readSandboxAuth, hostAuthPath, companyId, log, resolveCacheEntryPath, env } = input;
@@ -514,86 +636,96 @@ export async function copyBackCodexAuth(input: CopyBackCodexAuthInput): Promise<
           fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
           0o600,
         );
-        // On a non-Linux platform, the decision predicate reads its two
-        // arguments inside a separate `node` child process, at whatever
-        // moment THAT process happens to open them — real elapsed time no
-        // identity check in this parent can bracket, because the read never
-        // happens here. A local process could swap `canonicalHostDir` for a
+        // The decision predicate reads its two arguments inside a separate
+        // `node` child process, at whatever moment THAT process happens to
+        // open them — real elapsed time no identity check in this parent can
+        // bracket, because the read never happens here. On a non-Linux
+        // platform a local process could swap `canonicalHostDir` for a
         // directory holding a decoy host credential, let the predicate read
         // the decoy, then restore the exact original directory (same device
-        // and inode) before the write-time re-check that follows — a check
-        // that only compares directory identity, so a perfectly restored
-        // original passes it even though the predicate compared against the
-        // decoy. Snapshot the CURRENT host credential bytes into a private,
-        // unguessable temp file right here instead, immediately after a
-        // fresh identity re-check with no other `await` in between, and hand
-        // the predicate that frozen snapshot in place of the live path. A
-        // later swap-and-restore of `canonicalHostDir` can then no longer
-        // change what the predicate reads, because it no longer reads the
-        // live path at all. On Linux this step is unnecessary: the predicate
-        // already reads through the pinned descriptor's own
-        // `/proc/<pid>/fd/<fd>` alias, immune to a directory-level swap the
-        // same way every write already is.
-        let predicateDestinationPath = canonicalHostAuthPath;
+        // and inode) before a directory-only re-check — a check that only
+        // compares directory identity, so a perfectly restored original
+        // passes it even though the predicate compared against the decoy. On
+        // every platform, independent of any directory-level swap, a local
+        // process could instead replace just `auth.json` itself with a decoy
+        // and restore it afterward: the directory never changes at all, so a
+        // directory-identity check cannot see this either — on Linux, the
+        // pinned descriptor's own `/proc/<pid>/fd/<fd>` alias still performs
+        // a fresh by-name lookup of `auth.json` inside that directory on
+        // every read, so it is no defense against a swap of the entry itself.
+        // `readHostCredentialSnapshot` closes both gaps at once: it opens the
+        // host credential once, reads its bytes back through that same
+        // descriptor, and returns the descriptor's own `fstat` identity
+        // alongside those bytes, so the bytes handed to the predicate and the
+        // identity {@link assertHostCredentialIdentityUnchanged} checks later
+        // always describe one same file, on every platform. Freeze those
+        // bytes into a private, unguessable temp file and hand the predicate
+        // that frozen snapshot instead of the live host path: a later
+        // swap-and-restore, of the directory or of the credential file alone,
+        // can then no longer change what the predicate reads, because it no
+        // longer reads the live path at all.
         let destinationSnapshotPath: string | undefined;
+        let destinationIdentity: CredentialFileIdentity | undefined;
         try {
           await handle.writeFile(sandboxAuthBytes);
           await handle.close();
 
           if (process.platform !== "linux") {
             await assertPinnedDirectoryStillLive(pinnedDir, canonicalHostDir);
-            destinationSnapshotPath = path.join(
-              writeDirPath,
-              `.auth.json.copyback-dest-${process.pid}-${randomUUID()}.tmp`,
-            );
-            let destinationBytes: Buffer | undefined;
-            try {
-              destinationBytes = await readFile(canonicalHostAuthPath);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
-                throw error;
-              }
-              // Genuinely absent: leave `destinationSnapshotPath` unwritten so
-              // the predicate's own read of it also reports absent, matching
-              // the live path's true state without reading the live path a
-              // second time.
-            }
-            if (destinationBytes !== undefined) {
-              const destinationHandle = await open(
-                destinationSnapshotPath,
-                fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-                0o600,
-              );
-              try {
-                await destinationHandle.writeFile(destinationBytes);
-              } finally {
-                await destinationHandle.close();
-              }
-            }
-            predicateDestinationPath = destinationSnapshotPath;
           }
+
+          const destinationSnapshot = await readHostCredentialSnapshot(canonicalHostAuthPath);
+          destinationIdentity = destinationSnapshot?.identity;
+          // Built from `readDirPath`, not `writeDirPath`: the decision
+          // predicate below reads this path from a separate `node` CHILD
+          // process, where `/proc/self/fd` would name the CHILD's own
+          // descriptor table, not this parent's. `readDirPath` names this
+          // parent process's real pid on Linux, so the child reads through
+          // the same pinned descriptor this parent just wrote through; this
+          // parent can read and remove the same path just as well, since
+          // its own real pid resolves for it exactly as `/proc/self` would.
+          destinationSnapshotPath = path.join(
+            readDirPath,
+            `.auth.json.copyback-dest-${process.pid}-${randomUUID()}.tmp`,
+          );
+          if (destinationSnapshot !== undefined) {
+            const destinationHandle = await open(
+              destinationSnapshotPath,
+              fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+              0o600,
+            );
+            try {
+              await destinationHandle.writeFile(destinationSnapshot.bytes);
+            } finally {
+              await destinationHandle.close();
+            }
+          }
+          // Else genuinely absent: leave `destinationSnapshotPath` unwritten
+          // so the predicate's own read of it also reports absent, matching
+          // the live path's true state without reading the live path again.
 
           // The decision predicate runs in a separate `node` child process, so
           // it cannot address `writeDirPath`'s `/proc/self/fd` alias — `self`
           // would name the CHILD's own descriptor table. `stagedTempPath`
           // instead uses `readDirPath`, which on Linux names this parent
           // process's real pid, so the child reads through the same pinned
-          // descriptor every write above uses; on a non-Linux platform,
-          // `predicateDestinationPath` is the frozen snapshot above instead
-          // of the live path. That read only feeds a comparison; it can skew
-          // which side the predicate picks but never places attacker-controlled
+          // descriptor every write above uses; `destinationSnapshotPath` is
+          // the frozen snapshot above instead of the live path, on every
+          // platform. That read only feeds a comparison; it can skew which
+          // side the predicate picks but never places attacker-controlled
           // bytes anywhere on its own.
-          const decision = await decideCodexAuthMerge(stagedTempPath, predicateDestinationPath, {
+          const decision = await decideCodexAuthMerge(stagedTempPath, destinationSnapshotPath, {
             errorLabel: "codex auth copy-back",
           });
           if (decision === USE_SOURCE_EXIT) {
             // The decision predicate above awaited a separate child process —
-            // real time enough for a non-Linux directory swap the earlier
-            // check could not see. Re-verify immediately before this write,
-            // the same way as before the create above.
+            // real time enough for a directory swap or a credential-file swap
+            // the earlier checks could not see. Re-verify both immediately
+            // before this write, with no other `await` in between.
             if (process.platform !== "linux") {
               await assertPinnedDirectoryStillLive(pinnedDir, canonicalHostDir);
             }
+            await assertHostCredentialIdentityUnchanged(writeHostAuthPath, destinationIdentity);
             // Atomic same-directory swap through `writeDirPath`; rename
             // preserves the temp's 0600 mode.
             await rename(writeStagedTempPath, writeHostAuthPath);

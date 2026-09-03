@@ -1127,17 +1127,19 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
     });
 
     // Fires right after the directory-pin `open` call resolves (call 1);
-    // re-arms as a no-op for the staging-temp create (call 2); re-arms again
-    // to land the swap right after the destination-snapshot create resolves
-    // (call 3) — the moment right before the predicate spawns, after the fix
-    // has already snapshotted the real host credential. Renames the real
-    // directory aside (preserving its device and inode) and puts a fresh
-    // directory under the original name holding a decoy host credential AND
-    // a decoy source at the exact staged-temp name (standing in for an
-    // attacker who learned the name, for example by watching the directory
-    // before the swap), so a predicate that still read the live path would
-    // read both files from the decoy directory instead of failing closed on
-    // a missing source.
+    // re-arms as a no-op for the staging-temp create (call 2) and the
+    // destination-read open (call 3) — the fix already reads the real host
+    // credential through an already-open descriptor at that point, immune
+    // to a swap that lands afterward; re-arms again to land the swap right
+    // after the destination-snapshot create resolves (call 4), the moment
+    // right before the predicate spawns. Renames the real directory aside
+    // (preserving its device and inode) and puts a fresh directory under
+    // the original name holding a decoy host credential AND a decoy source
+    // at the exact staged-temp name (standing in for an attacker who
+    // learned the name, for example by watching the directory before the
+    // swap), so a predicate that still read the live path would read both
+    // files from the decoy directory instead of failing closed on a
+    // missing source.
     let openCallCount = 0;
     let swapApplied = false;
     const tempFileNames: string[] = [];
@@ -1146,7 +1148,7 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
       if (openCallCount === 2) {
         tempFileNames.push(path.basename(String(args[0])));
       }
-      if (openCallCount < 3) {
+      if (openCallCount < 4) {
         onAfterOpenCall = armNext;
         return Promise.resolve();
       }
@@ -1175,10 +1177,10 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
       log: () => {},
     });
 
-    // Guard the guard: if a future change removes the third `open` call (for
-    // example by reverting the destination-snapshot fix), the swap above
-    // would never fire and this test would pass for the wrong reason —
-    // trivially, by never exercising the race at all. Fail loud instead.
+    // Guard the guard: if a future change removes the fourth `open` call
+    // (for example by reverting the destination-snapshot fix), the swap
+    // above would never fire and this test would pass for the wrong reason
+    // — trivially, by never exercising the race at all. Fail loud instead.
     expect(swapApplied).toBe(true);
     expect(restoreApplied).toBe(true);
 
@@ -1188,6 +1190,142 @@ describe("copyBackCodexAuth directory-replacement race protection on a non-Linux
     // copy on the strength of a comparison against the decoy.
     expect(outcome).toBe("kept-host");
     expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+    expect(await readdir(hostDir)).toEqual(["auth.json"]);
+  });
+});
+
+// The directory-identity checks elsewhere in this suite prove the ENCLOSING
+// DIRECTORY was not replaced; they say nothing about `auth.json` itself. A
+// same-user process can replace just that file with a decoy, let the
+// decision compare the sandbox copy against the decoy, then restore the
+// exact original file afterward — the directory never changes identity at
+// all, on either platform, so a directory-only check cannot see this. This
+// suite proves the copy-back instead binds the decision to the credential
+// FILE's own identity (device, inode, and `ctime`) and rejects instead of
+// installing on the strength of a decision made against a decoy.
+describe("copyBackCodexAuth credential-file swap-and-restore protection", () => {
+  const cleanupDirs: string[] = [];
+  const originalPlatform = process.platform;
+
+  afterEach(async () => {
+    onAfterOpenCall = null;
+    onAfterDecideCodexAuthMerge = null;
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const HOST_REAL_NEWEST = "2026-07-09T05:00:00Z";
+  const SANDBOX_MIDDLE = "2026-07-09T02:00:00Z";
+  const DECOY_OLDEST = "2026-07-09T00:00:00Z";
+
+  // Fires right after the staging-temp create resolves (open call 2) — the
+  // instant before the copy-back's own destination-read `open` call, the
+  // narrowest point this race can land. Overwrites `auth.json` IN PLACE (a
+  // truncate-and-rewrite of the same directory entry, not a removal and
+  // recreation): the enclosing directory's own device and inode never
+  // change, and an in-place truncate-and-rewrite keeps the FILE's own
+  // device and inode too — only the file's `ctime`, bumped by the write
+  // itself, ever changes, so only a check bound to that, not to the
+  // directory's or even the file's dev/ino alone, can catch this.
+  async function runFileSwapRace(hostAuthPath: string): Promise<{ swapApplied: boolean; restoreApplied: boolean }> {
+    const hostAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: HOST_REAL_NEWEST,
+      marker: "host-real-newest",
+    });
+    await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+
+    // Older than the decoy below, so a decision that reads the decoy
+    // wrongly concludes the sandbox copy is fresher; older than the real
+    // host too, so the correct decision is always "keep host".
+    const sandboxAuth = subscriptionAuth({
+      accountId: "acct-same",
+      lastRefresh: SANDBOX_MIDDLE,
+      marker: "sandbox-middle",
+    });
+    const decoyAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: DECOY_OLDEST, marker: "decoy-oldest" });
+
+    let openCallCount = 0;
+    const result = { swapApplied: false, restoreApplied: false };
+    onAfterOpenCall = function armNext() {
+      openCallCount += 1;
+      if (openCallCount < 2) {
+        onAfterOpenCall = armNext;
+        return Promise.resolve();
+      }
+      return (async () => {
+        await writeFile(hostAuthPath, decoyAuth, { mode: 0o600 });
+        result.swapApplied = true;
+      })();
+    };
+    // Fires right after the decision resolves, before the write-time
+    // identity re-check: restores the real credential bytes, in place, at
+    // the same path.
+    onAfterDecideCodexAuthMerge = async () => {
+      await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+      result.restoreApplied = true;
+    };
+
+    await expect(
+      copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/changed identity/);
+
+    // The real host credential — genuinely the newest of the two real
+    // copies — must survive untouched: the decision compared the sandbox
+    // copy against the decoy and would otherwise have installed it.
+    expect(await readFile(hostAuthPath, "utf8")).toBe(hostAuth);
+    return result;
+  }
+
+  it("rejects the write instead of installing on the strength of a decision read against a decoy credential file swapped in and restored in place, on a non-Linux host", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+
+    const hostDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-file-swap-"));
+    cleanupDirs.push(hostDir);
+    const hostAuthPath = path.join(hostDir, "auth.json");
+
+    const { swapApplied, restoreApplied } = await runFileSwapRace(hostAuthPath);
+
+    // Guard the guard: a future change that removes the destination-read
+    // `open` call would let this swap land somewhere else and this test
+    // would pass for the wrong reason. Fail loud instead.
+    expect(swapApplied).toBe(true);
+    expect(restoreApplied).toBe(true);
+    expect(await readdir(hostDir)).toEqual(["auth.json"]);
+  });
+
+  it("rejects the write instead of installing on the strength of a decision read against a decoy credential file swapped in and restored in place, on Linux", async () => {
+    if (process.platform !== "linux") return;
+
+    const hostDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-file-swap-linux-"));
+    cleanupDirs.push(hostDir);
+    const hostAuthPath = path.join(hostDir, "auth.json");
+
+    const { swapApplied, restoreApplied } = await runFileSwapRace(hostAuthPath);
+
+    expect(swapApplied).toBe(true);
+    expect(restoreApplied).toBe(true);
     expect(await readdir(hostDir)).toEqual(["auth.json"]);
   });
 });
