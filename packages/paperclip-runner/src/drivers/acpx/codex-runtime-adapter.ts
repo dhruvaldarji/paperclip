@@ -228,7 +228,7 @@ export async function openQualifiedAcpxRuntime(
       overrides: { [options.profile.agent]: [VERIFIED_COMMAND_SENTINEL] },
     }),
     permissionMode: options.permissionMode,
-    elicitationModes: ["form"],
+    elicitationModes: options.profile.agent === "codex" ? [] : ["form"],
     nonInteractivePermissions: "fail",
     permissionPolicy: {
       ...options.permissionPolicy,
