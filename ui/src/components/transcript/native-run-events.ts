@@ -512,7 +512,11 @@ interface NativeToolItemDetails {
 
 function nativeToolItemDetails(
   payload: Record<string, unknown>,
-): { id: string | null; details: NativeToolItemDetails } | null {
+): {
+  id: string | null;
+  kind: "tooluse" | "toolresult";
+  details: NativeToolItemDetails;
+} | null {
   const item = normalizedItem(payload);
   const kind = (text(item.type) ?? "").replaceAll("_", "").toLowerCase();
   if (kind !== "tooluse" && kind !== "toolresult") return null;
@@ -521,6 +525,7 @@ function nativeToolItemDetails(
     : text(item.id);
   return {
     id,
+    kind,
     details: {
       name: text(item.name),
       ...(Object.prototype.hasOwnProperty.call(item, "input")
@@ -532,6 +537,15 @@ function nativeToolItemDetails(
       isError: item.isError === true || item.is_error === true,
     },
   };
+}
+
+function serializedNativeToolResult(item: NativeToolItemDetails): string {
+  if (item.result === undefined) return "";
+  try {
+    return JSON.stringify(item.result) ?? "";
+  } catch {
+    return "Tool result could not be serialized";
+  }
 }
 
 function toolPresentation(
@@ -726,6 +740,50 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       continue;
     }
 
+    // Some provider transports expose their complete dynamic-tool lifecycle
+    // directly as item.started/item.completed events and do not emit the
+    // parallel tool.execution.* activity stream. Project those canonical
+    // tool items at their own stable item boundary so saved documents can be
+    // embedded beside the write that created them instead of falling back to
+    // the end of the run timeline.
+    const nativeToolEvent = isItemIdentityEvent(event.eventType)
+      ? nativeToolItemDetails(payload)
+      : null;
+    if (nativeToolEvent) {
+      const toolId = nativeToolEvent.id ?? itemId;
+      if (!toolId) continue;
+      const nativeToolItem = nativeToolItemsById.get(toolId)
+        ?? nativeToolEvent.details;
+      const presentation = toolPresentation({}, nativeToolItem);
+      if (!startedToolIds.has(toolId)) {
+        startedToolIds.add(toolId);
+        entries.push({
+          kind: "tool_call",
+          ts,
+          name: presentation.name,
+          input: presentation.input,
+          toolUseId: toolId,
+        });
+      }
+      if (
+        event.eventType === "item.completed"
+        && (nativeToolEvent.kind === "toolresult"
+          || nativeToolEvent.details.result !== undefined)
+        && !completedToolIds.has(toolId)
+      ) {
+        completedToolIds.add(toolId);
+        entries.push({
+          kind: "tool_result",
+          ts,
+          toolUseId: toolId,
+          toolName: presentation.name,
+          content: serializedNativeToolResult(nativeToolItem),
+          isError: nativeToolItem.isError,
+        });
+      }
+      continue;
+    }
+
     const providerActivity = providerActivityPresentation(event, payload);
     if (providerActivity) {
       if (!startedToolIds.has(providerActivity.id)) {
@@ -770,14 +828,9 @@ export function nativeRunEventsToTranscript(events: readonly HeartbeatRunEvent[]
       if (event.eventType === "tool.execution.completed" && !completedToolIds.has(executionId)) {
         completedToolIds.add(executionId);
         const output = text(payload.output);
-        let content = output ?? "";
-        if (!output && nativeToolItem?.result !== undefined) {
-          try {
-            content = JSON.stringify(nativeToolItem.result) ?? "";
-          } catch {
-            content = "Tool result could not be serialized";
-          }
-        }
+        const content = output ?? (nativeToolItem
+          ? serializedNativeToolResult(nativeToolItem)
+          : "");
         entries.push({
           kind: "tool_result",
           ts,
