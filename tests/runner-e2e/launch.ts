@@ -770,7 +770,7 @@ async function runExecutionWithRetry(input: {
   }
   if (cancelled) throw new Error("Runner E2E campaign cancelled");
   console.warn(
-    `Retrying ${execution.id} in a fresh isolated harness after transient infrastructure failure`,
+    `Retrying ${execution.id} in a fresh isolated harness after ${firstResult.failureClass.replaceAll("_", " ")}`,
   );
   const [retryResult] = await runAttempt({
     executions: [execution],

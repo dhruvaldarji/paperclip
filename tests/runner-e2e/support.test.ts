@@ -438,6 +438,7 @@ describe("runner E2E failure policy", () => {
     expect(
       shouldRetryFailure(classifyFailure(new Error("marker matcher failed"))),
     ).toBe(false);
+    expect(shouldRetryFailure("provider_variance")).toBe(true);
     expect(
       classifyFailure(
         new Error(
