@@ -123,20 +123,22 @@ it("pins the OpenCode launch profile in runner startup arguments and restarts", 
   handle.restart("replacement-ticket");
   expect(launches).toHaveLength(2);
   for (const launch of launches) {
-    expect(launch.args).toEqual(expect.arrayContaining([
-      "--opencode-proxy-command",
-      profile.command,
-      "--opencode-proxy-command-sha256",
-      profile.commandSha256,
-      "--opencode-proxy-script",
-      profile.proxyScript,
-      "--opencode-proxy-script-sha256",
-      profile.proxyScriptSha256,
-      "--opencode-executable",
-      profile.executable,
-      "--opencode-executable-sha256",
-      profile.executableSha256,
-    ]));
+    expect(launch.args).toEqual(
+      expect.arrayContaining([
+        "--opencode-proxy-command",
+        profile.command,
+        "--opencode-proxy-command-sha256",
+        profile.commandSha256,
+        "--opencode-proxy-script",
+        profile.proxyScript,
+        "--opencode-proxy-script-sha256",
+        profile.proxyScriptSha256,
+        "--opencode-executable",
+        profile.executable,
+        "--opencode-executable-sha256",
+        profile.executableSha256,
+      ]),
+    );
   }
 });
 
@@ -228,9 +230,9 @@ it("preserves the controller-selected ACPX provider package root", () => {
   });
 
   expect(launches).toHaveLength(1);
-  expect(
-    launches[0]!.environment.PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT,
-  ).toBe("/verified/provider-pack");
+  expect(launches[0]!.environment.PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT).toBe(
+    "/verified/provider-pack",
+  );
   expect(launches[0]!.environment.NODE_PATH).toBeUndefined();
 });
 
@@ -962,6 +964,65 @@ describe.sequential("DurablePrpControlPlane", () => {
         { commandId: "command-tool-1", status: "indeterminate" },
         { commandId: "command-interrupt-1", status: "pending" },
       ]);
+    } finally {
+      await controlPlane.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("acknowledges terminal command results after persisting them", async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "paperclip-prp-terminal-ack-"));
+    const controlPlane = new DurablePrpControlPlane({
+      stateDirectory: root,
+      identity,
+      expectedRunnerVersion,
+      expectedRunnerDigest,
+    });
+    try {
+      await controlPlane.start();
+      const command = controlPlane.queueCommand(
+        "runner.suspend",
+        {},
+        "command-suspend-1",
+      );
+      const client = await authenticate(
+        controlPlane,
+        controlPlane.issueBootstrapTicket(),
+      );
+      const terminalResult = {
+        protocol: "paperclip.runner",
+        version: 1,
+        kind: "command_result",
+        payload: {
+          commandId: command.commandId,
+          commandType: command.type,
+          controllerSeq: command.controllerSeq,
+          status: "completed",
+          result: { suspended: true },
+        },
+      };
+
+      sendSecure(client!, terminalResult);
+      await expect(receiveSecure(client!)).resolves.toMatchObject({
+        kind: "command_result_ack",
+        payload: {
+          commandId: "command-suspend-1",
+          commandType: "runner.suspend",
+          controllerSeq: command.controllerSeq,
+          status: "completed",
+        },
+      });
+      expect(controlPlane.store.state.commands).toMatchObject([
+        { commandId: "command-suspend-1", status: "completed" },
+      ]);
+
+      sendSecure(client!, terminalResult);
+      await expect(receiveSecure(client!)).resolves.toMatchObject({
+        kind: "command_result_ack",
+        payload: { commandId: "command-suspend-1" },
+      });
+      expect(controlPlane.store.state.duplicateCommandResults).toBe(1);
+      client?.socket.destroy();
     } finally {
       await controlPlane.stop();
       rmSync(root, { recursive: true, force: true });
