@@ -837,3 +837,102 @@ describe("copyBackCodexAuth directory-swap-to-symlink protection", () => {
     ]);
   });
 });
+
+// A non-Linux host cannot pin the copy-back directory behind a `/proc/self/fd`
+// descriptor (`/proc` does not exist there), but it must still install a
+// refreshed credential: the managed-home safety checks (containment, symlink
+// rejection) do not depend on that descriptor pin. This suite forces
+// `process.platform` to a non-Linux value and proves the write still happens,
+// and that the containment re-check still blocks a target outside the tree.
+describe("copyBackCodexAuth on a non-Linux host", () => {
+  const cleanupDirs: string[] = [];
+  const originalPlatform = process.platform;
+  const COMPANY_ID = "company-a";
+
+  afterEach(async () => {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (!dir) continue;
+      await chmod(dir, 0o700).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  function subscriptionAuth(input: { accountId: string; lastRefresh?: string; marker: string }): string {
+    return JSON.stringify({
+      tokens: {
+        id_token: `id-token-${input.marker}`,
+        access_token: `access-token-${input.marker}`,
+        refresh_token: `refresh-token-${input.marker}`,
+        account_id: input.accountId,
+      },
+      ...(input.lastRefresh ? { last_refresh: input.lastRefresh } : {}),
+    });
+  }
+
+  const NEWER = "2026-07-09T02:00:00Z";
+  const OLDER = "2026-07-09T01:00:00Z";
+
+  it.each(["darwin", "win32"])(
+    "installs a strictly-newer sandbox credential onto the host on %s",
+    async (platform) => {
+      Object.defineProperty(process, "platform", { value: platform });
+      const hostDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-nonlinux-"));
+      cleanupDirs.push(hostDir);
+      const hostAuthPath = path.join(hostDir, "auth.json");
+      const hostAuth = subscriptionAuth({ accountId: "acct-same", lastRefresh: OLDER, marker: "host-older" });
+      await writeFile(hostAuthPath, hostAuth, { mode: 0o600 });
+      const sandboxAuth = subscriptionAuth({
+        accountId: "acct-same",
+        lastRefresh: NEWER,
+        marker: "sandbox-newer",
+      });
+
+      const logs: string[] = [];
+      const outcome = await copyBackCodexAuth({
+        readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+        hostAuthPath,
+        log: (line) => {
+          logs.push(line);
+        },
+      });
+
+      expect(outcome).toBe("copied");
+      expect(await readFile(hostAuthPath, "utf8")).toBe(sandboxAuth);
+      expect((await lstat(hostAuthPath)).mode & 0o777).toBe(0o600);
+      // No staging temp is left behind on the write path.
+      expect((await readdir(hostDir)).filter((name) => name !== "auth.json")).toEqual([]);
+      expect(logs.join("\n")).not.toContain("outside the managed directory tree");
+    },
+  );
+
+  it("still keeps the host, writes nothing, when the target sits outside the company's own tree", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-nonlinux-containment-"));
+    cleanupDirs.push(homeDir);
+    const env: NodeJS.ProcessEnv = { PAPERCLIP_HOME: homeDir, PAPERCLIP_INSTANCE_ID: "default" };
+    await mkdir(path.join(homeDir, "instances", "default", "companies", COMPANY_ID), { recursive: true });
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-copyback-nonlinux-outside-"));
+    cleanupDirs.push(outsideDir);
+    const hostAuthPath = path.join(outsideDir, "auth.json");
+    const sandboxAuth = subscriptionAuth({ accountId: "acct-x", lastRefresh: NEWER, marker: "sandbox-outside" });
+
+    const logs: string[] = [];
+    const outcome = await copyBackCodexAuth({
+      readSandboxAuth: async () => Buffer.from(sandboxAuth, "utf8"),
+      hostAuthPath,
+      companyId: COMPANY_ID,
+      log: (line) => {
+        logs.push(line);
+      },
+      env,
+    });
+
+    expect(outcome).toBe("kept-host");
+    expect(await readdir(outsideDir)).toEqual([]);
+    expect(logs).toEqual([
+      "[paperclip] Codex auth copy-back: skipped (the configured Codex home is outside the managed directory tree).",
+    ]);
+  });
+});
