@@ -144,6 +144,7 @@
     "demo:live-console": "pnpm run build:typescript && node scripts/live-console-demo-server.mjs",
     "smoke:capability:ui": "pnpm run build:typescript && cargo build --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd && node scripts/capability-issue-thread-smoke.mjs",
     "smoke:capability:cleanroom": "pnpm run build:typescript && cargo build --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd && node scripts/capability-clean-room-smoke.mjs",
+    "smoke:local-provider": "node scripts/run-local-provider-smoke.mjs",
     "console:live-console": "pnpm run build:typescript && vite --config vite.config.ts --host 127.0.0.1 --port 4180",
     "console:sdk": "pnpm run build:typescript && vite --config vite.sdk.config.ts --host 127.0.0.1 --port 4181",
     "browser:dev": "pnpm run build:typescript && pnpm run build:runner-binaries && vite --config vite.config.ts",

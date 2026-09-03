@@ -14,6 +14,13 @@ const privateDir = required("PAPERCLIP_RUNNER_E2E_PRIVATE_DIR");
 const paperclipHome = required("PAPERCLIP_HOME");
 const configPath = required("PAPERCLIP_CONFIG");
 const baseURL = `http://127.0.0.1:${port}`;
+const chromiumExecutable =
+  process.env.PAPERCLIP_RUNNER_E2E_CHROMIUM_EXECUTABLE?.trim();
+if (chromiumExecutable && !path.isAbsolute(chromiumExecutable)) {
+  throw new Error(
+    "PAPERCLIP_RUNNER_E2E_CHROMIUM_EXECUTABLE must be an absolute path",
+  );
+}
 required("PAPERCLIP_INSTANCE_ID");
 required("PAPERCLIP_AGENT_JWT_SECRET");
 required("PAPERCLIP_DECISION_SIGNING_SECRET");
@@ -38,12 +45,17 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: "chromium",
+    ...(chromiumExecutable
+      ? { launchOptions: { executablePath: chromiumExecutable } }
+      : {}),
     headless: true,
     actionTimeout: 30_000,
     navigationTimeout: 30_000,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
-    video: "retain-on-failure",
+    // A developer-supplied system Chromium keeps the local smoke loop
+    // installation-free; CI's managed browser retains failure video as usual.
+    video: chromiumExecutable ? "off" : "retain-on-failure",
   },
   webServer: {
     // Do not put an env object here: Playwright serializes webServer config in
