@@ -4,6 +4,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -126,21 +127,31 @@ try {
     throw new Error(`pnpm deploy failed with exit code ${deployed.status}`);
   }
 
-  // The generic `node` npm package runs an install-time downloader. Depend on
-  // the immutable Linux x64 artifact directly, then expose it at the stable
-  // pack-owned path consumed by the verified launch contract.
-  const packagedNodeRoot = join(
-    temporaryRoot,
-    "node_modules",
-    "node-linux-x64",
-  );
+  // Reuse the already-qualified build interpreter instead of introducing a
+  // package-manager lifecycle hook or a second binary supply chain. The pack
+  // manifest binds the copied bytes, platform, architecture, and minimum
+  // version before any provider is launched.
+  const minimumNodeVersion = [24, 11, 0];
+  const actualNodeVersion = process.versions.node.split(".").map(Number);
+  if (
+    actualNodeVersion[0] < minimumNodeVersion[0] ||
+    (actualNodeVersion[0] === minimumNodeVersion[0] &&
+      (actualNodeVersion[1] < minimumNodeVersion[1] ||
+        (actualNodeVersion[1] === minimumNodeVersion[1] &&
+          actualNodeVersion[2] < minimumNodeVersion[2])))
+  ) {
+    throw new Error("Provider pack build Node is older than 24.11.0");
+  }
   const stableNodeRoot = join(temporaryRoot, "node_modules", "node");
-  if (!existsSync(packagedNodeRoot) || existsSync(stableNodeRoot)) {
+  if (existsSync(stableNodeRoot)) {
     throw new Error(
-      "Provider pack requires the pinned node-linux-x64 artifact and an unclaimed stable Node path",
+      "Provider pack deployment unexpectedly claimed the stable Node path",
     );
   }
-  renameSync(packagedNodeRoot, stableNodeRoot);
+  const stableNodeCommand = join(stableNodeRoot, "bin", "node");
+  mkdirSync(dirname(stableNodeCommand), { recursive: true, mode: 0o755 });
+  copyFileSync(process.execPath, stableNodeCommand);
+  chmodSync(stableNodeCommand, 0o755);
 
   // pnpm's generated .bin shims embed the temporary deployment directory in
   // NODE_PATH. That makes an otherwise identical provider pack hash differ on
@@ -250,7 +261,7 @@ try {
       }).status !== 0;
   const payload = {
     pins: {
-      nodeMinimum: "24.11.0",
+      nodeMinimum: minimumNodeVersion.join("."),
       codex: "0.148.0",
       opencode: "1.18.17",
       acpx: "0.13.1",

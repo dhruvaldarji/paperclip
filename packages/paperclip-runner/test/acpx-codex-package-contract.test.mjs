@@ -54,12 +54,8 @@ const nativeSessionExecutor = await readFile(
 );
 
 test("the runner pins every qualified ACPX production dependency", () => {
-  assert.equal(runnerPackage.dependencies["@openai/codex"], "0.148.0");
-  assert.equal(
-    runnerPackage.optionalDependencies["@openai/codex-linux-x64"],
-    "npm:@openai/codex@0.148.0-linux-x64",
-  );
-  assert.equal(runnerPackage.optionalDependencies["node-linux-x64"], "24.11.0");
+  assert.equal(runnerPackage.dependencies["@openai/codex"], undefined);
+  assert.equal(runnerPackage.optionalDependencies, undefined);
   assert.equal(runnerPackage.dependencies.node, undefined);
   assert.equal(runnerPackage.dependencies.acpx, "0.13.1");
   assert.equal(
@@ -133,8 +129,9 @@ test("old and new pnpm configuration both apply the exact runtime patches", () =
   assert.doesNotMatch(workspace, /node@24\.11\.0:/);
   assert.match(
     providerPackBuilder,
-    /renameSync\(packagedNodeRoot, stableNodeRoot\)/,
+    /copyFileSync\(process\.execPath, stableNodeCommand\)/,
   );
+  assert.match(codexPatch, /\+    "@openai\/codex": "0\.148\.0"/);
 });
 
 test("the ACPX patch preserves launch-only state and verified spawning", () => {
