@@ -32,11 +32,11 @@ const ignoredGeneratedDirectoryPaths = new Set([
   "packages/paperclip-runner/runner/target",
 ]);
 
-// These paths may be copied into Docker's provider-build context, but they do
-// not contribute to the release runnerd binary or the executable/digested
-// provider-pack runtime payload. Keep the exclusions narrow and package-scoped:
-// unknown non-documentation files remain hashed by default, so a newly
-// introduced runtime input fails safe by invalidating the image key.
+// These paths do not contribute to the release runnerd binary or the
+// executable/digested provider-pack runtime payload. They are also excluded
+// from the real Docker build context by .dockerignore. Keep the two lists in
+// lockstep: if a future build starts consuming one of these inputs, Docker must
+// fail instead of publishing bytes that the content identity did not hash.
 const ignoredRunnerDevelopmentDirectoryPaths = new Set([
   "packages/paperclip-runner/devtools",
   "packages/paperclip-runner/docs",
@@ -50,6 +50,8 @@ const runnerDocumentationFilePattern = /\.md$/;
 const runnerTestFilePattern = /\.(?:spec|test)\.(?:[cm]?[jt]sx?)$/;
 const runnerRustIntegrationTestPathPattern =
   /^packages\/paperclip-runner\/runner\/crates\/[^/]+\/tests(?:\/|$)/;
+const runnerSmokeScriptPattern =
+  /^packages\/paperclip-runner\/scripts\/[^/]+-smoke\.mjs$/;
 
 export interface DaytonaImageContentOptions {
   repositoryRoot?: string;
@@ -78,7 +80,8 @@ function shouldIgnoreRunnerDevelopmentInput(relativePath: string): boolean {
   return (
     runnerDocumentationFilePattern.test(relativePath) ||
     runnerTestFilePattern.test(relativePath) ||
-    runnerRustIntegrationTestPathPattern.test(relativePath)
+    runnerRustIntegrationTestPathPattern.test(relativePath) ||
+    runnerSmokeScriptPattern.test(relativePath)
   );
 }
 

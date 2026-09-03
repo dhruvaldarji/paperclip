@@ -59,6 +59,20 @@ describe("runner E2E Daytona image contract", () => {
     expect(dockerignore).toContain("**/node_modules");
     expect(dockerignore).toContain("packages/paperclip-runner/dist");
     expect(dockerignore).toContain("packages/paperclip-runner/runner/target");
+    for (const developmentOnlyInput of [
+      "packages/paperclip-runner/devtools",
+      "packages/paperclip-runner/docs",
+      "packages/paperclip-runner/examples",
+      "packages/paperclip-runner/test",
+      "packages/paperclip-runner/test-fixtures",
+      "packages/paperclip-runner/test-support",
+      "packages/paperclip-runner/**/*.md",
+      "packages/paperclip-runner/**/*.test.ts",
+      "packages/paperclip-runner/runner/crates/*/tests",
+      "packages/paperclip-runner/scripts/*-smoke.mjs",
+    ]) {
+      expect(dockerignore).toContain(developmentOnlyInput);
+    }
     expect(workflow).toContain("--platform linux/amd64");
     expect(workflow).toContain(
       "Compute Daytona image content ID with pinned bases",
@@ -192,6 +206,7 @@ describe("runner E2E Daytona image contract", () => {
       await mkdir(path.join(runnerRoot, "src/live"), { recursive: true });
       await mkdir(path.join(runnerRoot, "docs"), { recursive: true });
       await mkdir(path.join(runnerRoot, "spec"), { recursive: true });
+      await mkdir(path.join(runnerRoot, "scripts"), { recursive: true });
       await mkdir(path.join(runnerRoot, "test-fixtures"), { recursive: true });
       await mkdir(path.join(runnerRoot, "runner/crates/runner-core/src"), {
         recursive: true,
@@ -225,6 +240,10 @@ describe("runner E2E Daytona image contract", () => {
         '{"fixture":"one"}\n',
       );
       await writeFile(
+        path.join(runnerRoot, "scripts/capability-clean-room-smoke.mjs"),
+        "first smoke probe\n",
+      );
+      await writeFile(
         path.join(runnerRoot, "runner/crates/runner-core/tests/recovery.rs"),
         "// first Rust integration test\n",
       );
@@ -246,6 +265,10 @@ describe("runner E2E Daytona image contract", () => {
       await writeFile(
         path.join(runnerRoot, "test-fixtures/provider.json"),
         '{"fixture":"two"}\n',
+      );
+      await writeFile(
+        path.join(runnerRoot, "scripts/capability-clean-room-smoke.mjs"),
+        "second smoke probe\n",
       );
       await writeFile(
         path.join(runnerRoot, "runner/crates/runner-core/tests/recovery.rs"),
