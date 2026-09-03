@@ -91,8 +91,13 @@ function acpxExecution(
         agentServerVersion:
           agent === "codex" ? "1.6.2" : agent === "pi" ? "0.0.33" : "0.70.0",
         agentRuntimePackage:
-          agent === "pi" ? "@earendil-works/pi-coding-agent" : null,
-        agentRuntimeVersion: agent === "pi" ? "0.84.2" : null,
+          agent === "pi"
+            ? "@earendil-works/pi-coding-agent"
+            : agent === "codex"
+              ? "@openai/codex"
+              : null,
+        agentRuntimeVersion:
+          agent === "pi" ? "0.84.2" : agent === "codex" ? "0.148.0" : null,
         commandDigest:
           agent === "codex"
             ? "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79"
@@ -168,12 +173,16 @@ function managedExecution(
         profileId: "profile",
         region: "us-east-1",
         accountId: "123456789012",
-        harnessArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/test",
+        harnessArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123456789012:harness/test",
         harnessVersion: "1",
-        endpointArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:endpoint/test",
+        endpointArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123456789012:endpoint/test",
         endpointQualifier: "1",
-        agentRuntimeArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
-        memoryArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/test",
+        agentRuntimeArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
+        memoryArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/test",
         memoryId: "memory",
         invocationRoleArn: "arn:aws:iam::123456789012:role/runner",
         contextBucket: "context-bucket",
@@ -221,9 +230,9 @@ describe("native backend factory", () => {
   );
 
   it("requires an explicit runtime root for OpenCode", () => {
-    expect(() =>
-      createNativeSessionBackend(opencodeExecution()),
-    ).toThrow("OpenCode native backend requires an instance runtime directory");
+    expect(() => createNativeSessionBackend(opencodeExecution())).toThrow(
+      "OpenCode native backend requires an instance runtime directory",
+    );
   });
 
   it("routes OpenCode through runnerd when a durable transport is supplied", async () => {
@@ -247,8 +256,16 @@ describe("native backend factory", () => {
   });
 
   it.each([
-    ["claude_managed" as const, "claude_managed_agents_api", "managed-agents-2026-04-01"],
-    ["aws_agentcore" as const, "aws_agentcore_harness_api", "aws-agentcore-harness-v1"],
+    [
+      "claude_managed" as const,
+      "claude_managed_agents_api",
+      "managed-agents-2026-04-01",
+    ],
+    [
+      "aws_agentcore" as const,
+      "aws_agentcore_harness_api",
+      "aws-agentcore-harness-v1",
+    ],
   ])("routes %s through runnerd", async (kind, name, version) => {
     const backend = createNativeSessionBackend(managedExecution(kind), {
       codexTransportFactory: () => {

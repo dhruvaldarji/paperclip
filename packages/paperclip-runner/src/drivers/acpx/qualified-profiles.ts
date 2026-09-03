@@ -78,8 +78,8 @@ export const QUALIFIED_ACPX_PROFILES: Readonly<
     agentProfileVersion: 1,
     agentServerPackage: "@agentclientprotocol/codex-acp",
     agentServerVersion: "1.6.2",
-    agentRuntimePackage: null,
-    agentRuntimeVersion: null,
+    agentRuntimePackage: "@openai/codex",
+    agentRuntimeVersion: "0.148.0",
     commandDigest:
       "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79",
     qualificationModel: "gpt-5.6-sol",
