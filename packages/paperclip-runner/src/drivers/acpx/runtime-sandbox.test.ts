@@ -414,6 +414,53 @@ describe("ACPX runtime sandbox", () => {
     await expect(stat(owner.root)).resolves.toBeDefined();
   });
 
+  it("frees the marker when the last declined occupant closes after its owner", async () => {
+    const fixture = await sandboxFixture("codex");
+    const owner = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+
+    // A second Runner process starts with an empty in-process registry. Its
+    // claim on the same deterministic root is declined, since the first
+    // admission already owns the marker, but it still builds a live sandbox
+    // on the shared root and keeps using it.
+    vi.resetModules();
+    const sharingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    const sharedOccupant = await sharingProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(sharedOccupant.root).toBe(owner.root);
+    const markerPath = join(
+      dirname(owner.root),
+      `${basename(owner.root)}.owner`,
+    );
+
+    // The owner admission closes first. The shared occupant's durable lease
+    // is still on disk, so this must not free the marker yet.
+    await releaseAcpxRuntimeSandboxRootClaim(owner);
+    await expect(stat(markerPath)).resolves.toBeDefined();
+
+    // The shared occupant is now the root's only remaining occupant, even
+    // though its own identifier never won the original marker claim. Its
+    // own close must still free the marker for a later admission to reclaim.
+    await sharingProcess.releaseAcpxRuntimeSandboxRootClaim(sharedOccupant);
+    await expect(stat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    vi.resetModules();
+    const laterProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    const later = await laterProcess.prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    expect(later.root).toBe(owner.root);
+    await laterProcess.removeOwnedAcpxRuntimeSandboxRoot(later);
+    await expect(stat(owner.root)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("never frees a marker for a concurrent claim to slip past a still-deciding release", async () => {
     const fixture = await sandboxFixture("codex");
     const first = await prepareAcpxRuntimeSandbox({
@@ -547,6 +594,48 @@ describe("ACPX runtime sandbox", () => {
     expect(recovered.root).toBe(probe.root);
     await expect(stat(gatePath)).rejects.toMatchObject({ code: "ENOENT" });
     await removeOwnedAcpxRuntimeSandboxRoot(recovered);
+  });
+
+  it("never reaps a gate its holder created but has not yet written its pid and token to", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder is mid-acquisition: it has created the gate file exclusively,
+    // the same first step production code takes, but has not yet written
+    // its pid and token to it.
+    await writeFile(gatePath, "", { flag: "wx" });
+
+    vi.resetModules();
+    const waitingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    let waitingSettled = false;
+    const waiting = waitingProcess
+      .prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+      })
+      .finally(() => {
+        waitingSettled = true;
+      });
+
+    await waitForConcurrentClaimHeadStart();
+    // The still-empty gate must not be reaped: its holder has not yet
+    // proven, one way or the other, whether it is alive or dead.
+    expect(waitingSettled).toBe(false);
+    await expect(readFile(gatePath, "utf8")).resolves.toBe("");
+
+    // The holder finishes its acquisition and later releases the gate
+    // normally, the same way a real holder's own critical section ends.
+    await unlink(gatePath);
+
+    const sandbox = await waiting;
+    expect(sandbox.root).toBe(probe.root);
+    await waitingProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
   });
 
   it("never removes a live gate that replaced the stale gate recovery inspected", async () => {

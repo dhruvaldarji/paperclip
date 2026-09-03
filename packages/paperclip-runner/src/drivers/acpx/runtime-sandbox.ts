@@ -857,17 +857,24 @@ async function breakStaleAcpxRuntimeSandboxRootGate(
     throw error;
   }
   try {
-    let holderPid: number | null = null;
+    let holderPid: number;
     try {
       const bytes = await readFile(capturePath);
       const contents = bytes.toString("utf8").trim();
       const parsed = Number.parseInt(contents, 10);
-      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        // Empty or malformed: a holder writes its pid and token only after
+        // it has already created the gate file, so a gate this call reads
+        // in that gap looks the same as one that is genuinely malformed.
+        // Neither proves the holder dead, so treat both as still live.
+        return;
+      }
+      holderPid = parsed;
     } catch {
-      // Unreadable or malformed: nothing provable to break here.
+      // Unreadable: nothing provable to break here.
       return;
     }
-    if (holderPid !== null && isAcpxSandboxRootGateHolderAlive(holderPid)) {
+    if (isAcpxSandboxRootGateHolderAlive(holderPid)) {
       return;
     }
     await dependencies.beforeStaleGateRemoval?.();
@@ -1082,23 +1089,26 @@ export async function removeOwnedAcpxRuntimeSandboxRoot(
 }
 
 /**
- * Release the delete-authority claim on a sandbox root without removing the
- * root itself. Call this when an admission that reached a live host ends,
- * so a later admission for the same deterministic session root can claim
- * the marker and, if it later aborts, clean up its own attempt. Without
- * this release, the marker would keep the previous admission's identifier
- * for the process lifetime and every later admission's own abort cleanup
- * would find a marker it can never match.
+ * Release this admission's own claim on a sandbox root without removing the
+ * root itself. Call this when an admission's own use of the root ends,
+ * whether it holds the marker or was declined, so a later admission for the
+ * same deterministic session root can claim the marker and, if it later
+ * aborts, clean up its own attempt.
  *
- * The marker is freed only when no other admission still holds a durable
- * lease on this root. A declined admission — possibly in a different Runner
- * process — may still be using the root when the owner closes; freeing the
- * marker in that case would let a third admission claim it and later delete
- * the still-live root out from under that declined admission. When a lease
- * remains, the marker stays in place, and the root becomes reachable only
- * to admissions that share it; the marker then remains stale until an
- * existing recovery process reclaims it, the same accepted failure mode as
- * a marker left by a hard process crash.
+ * The marker is freed when this admission is the last one still using the
+ * root: after this admission's own lease is released, no other admission's
+ * durable lease remains on it. Freeing the marker only then means a
+ * still-live admission — the marker owner, or a declined admission sharing
+ * the root in a different Runner process — always keeps its claim
+ * recognized until it too closes. Which admission is recorded as the
+ * marker's owner does not decide who may free it: the owner may close
+ * first and leave a declined admission as the last one still using the
+ * root, and that declined admission must still be able to free the marker
+ * when its own turn comes. When another lease remains, the marker stays in
+ * place and the root stays reachable only to admissions that share it; the
+ * marker then remains stale until an existing recovery process reclaims
+ * it, the same accepted failure mode as a marker left by a hard process
+ * crash.
  *
  * The lease read, the lease count, and the resulting marker release all run
  * as one gated step, so no claim can register a new lease in the gap
@@ -1119,8 +1129,12 @@ export async function releaseAcpxRuntimeSandboxRootClaim(
     const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
       owner.markerPath,
     );
+    // Freeing the marker does not require this admission's own identifier to
+    // match it: the marker owner may already have closed and left a
+    // declined admission as the root's last occupant, and that declined
+    // admission must still be able to free the marker on its own close.
     const freeable =
-      storedIdentifier === owner.identifier &&
+      storedIdentifier !== null &&
       (await countOtherAcpxRuntimeSandboxRootLeases(
         owner.root,
         owner.identifier,
