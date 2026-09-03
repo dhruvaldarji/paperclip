@@ -14,6 +14,7 @@ import {
   companies,
   completionContracts,
   createDb,
+  heartbeatRuns,
   nativeRunFinalizations,
   nativeRunResults,
   statusDecisions,
@@ -24,6 +25,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import {
   registerServerAdapter,
   unregisterServerAdapter,
@@ -90,10 +92,14 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
   }, 20_000);
 
   afterEach(async () => {
-    // Terminal run status is committed before trailing lifecycle events and
-    // scratch cleanup settle. Drain those writes before taking the exclusive
-    // TRUNCATE locks, or the cleanup transaction can deadlock with them.
-    await heartbeat.drainActiveRunExecutions();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const runStatuses = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns);
+    const pendingRuns = runStatuses.filter(
+      (run) => run.status === "queued" || run.status === "running",
+    );
+    expect(pendingRuns).toEqual([]);
     vi.clearAllMocks();
     await db.execute(
       sql.raw(`
@@ -119,10 +125,10 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
   });
 
   afterAll(async () => {
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
     for (const [adapterType] of DIRECT_ADAPTERS) {
       unregisterServerAdapter(adapterType);
     }
-    await heartbeat.drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 
