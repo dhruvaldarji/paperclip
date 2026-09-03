@@ -879,7 +879,7 @@ describe("TaskChatThreadView interaction items", () => {
     expect(
       container
         .querySelector('[data-testid="task-chat-interaction"]')
-        ?.parentElement?.classList.contains("-mt-3"),
+        ?.parentElement?.classList.contains("mt-3"),
     ).toBe(true);
   });
 
