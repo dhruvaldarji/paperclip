@@ -100,7 +100,7 @@ function acpxExecution(
           agent === "pi" ? "0.84.2" : agent === "codex" ? "0.148.0" : null,
         commandDigest:
           agent === "codex"
-            ? "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79"
+            ? "sha256:7a923b3829884d3cabcc9659d22cace3f86813e7bfffc90974b10140a45bc400"
             : agent === "pi"
               ? "sha256:8c696f38296d53d0061fa11534570c5ddd951b63532aed30e0f1fcc676dc169f"
               : "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",

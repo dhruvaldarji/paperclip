@@ -288,7 +288,7 @@ describe("remote provider pack manifest", () => {
         claude:
           "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
         codex:
-          "sha256:94049b3e3c3aee87de62703786e4fa81d031d7bd979f99bdf516d84f28791a79",
+          "sha256:7a923b3829884d3cabcc9659d22cace3f86813e7bfffc90974b10140a45bc400",
       },
       artifacts: {
         nodeCommand: {

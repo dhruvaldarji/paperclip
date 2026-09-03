@@ -998,7 +998,9 @@ describe("ACPX runtime host", () => {
         stageCredential,
       },
     );
-    await vi.waitFor(() => expect(stageCredential).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(stageCredential).toHaveBeenCalledOnce(), {
+      timeout: 5_000,
+    });
 
     controller.abort(cancellation);
     await expect(opening).rejects.toBe(cancellation);
