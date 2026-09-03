@@ -1068,7 +1068,12 @@ describe("ACPX runtime host", () => {
       },
       fixture.dependencies({ openRuntime }),
     );
-    await vi.waitFor(() => expect(openRuntime).toHaveBeenCalledOnce());
+    // Real credential staging and tool-bridge startup can exceed Vitest's
+    // one-second waitFor default on a busy CI runner. Keep the admission live
+    // until it reaches the boundary this cancellation test is exercising.
+    await vi.waitFor(() => expect(openRuntime).toHaveBeenCalledOnce(), {
+      timeout: 5_000,
+    });
     expect(receivedSignal).toBe(controller.signal);
 
     controller.abort(cancellation);
