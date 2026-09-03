@@ -477,9 +477,6 @@ importers:
       '@agentclientprotocol/codex-acp':
         specifier: 1.6.2
         version: 1.6.2(patch_hash=grbydorkxatbzksnwwfuawwtim)
-      '@openai/codex':
-        specifier: 0.148.0
-        version: 0.148.0
       acpx:
         specifier: 0.13.1
         version: 0.13.1(patch_hash=lzpwjtiaybzoijy455dfycwavu)
@@ -489,9 +486,6 @@ importers:
       json-schema-to-ts:
         specifier: ^3.1.1
         version: 3.1.1
-      node:
-        specifier: 24.11.0
-        version: 24.11.0
       opencode-ai:
         specifier: 1.18.17
         version: 1.18.17
@@ -501,10 +495,6 @@ importers:
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1
-    optionalDependencies:
-      '@openai/codex-linux-x64':
-        specifier: npm:@openai/codex@0.148.0-linux-x64
-        version: '@openai/codex@0.148.0-linux-x64'
     devDependencies:
       '@paperclipai/paperclip-eval-kernel':
         specifier: workspace:*
@@ -7098,9 +7088,6 @@ packages:
     resolution: {integrity: sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==}
     engines: {node: '>= 0.6'}
 
-  node-bin-setup@1.1.4:
-    resolution: {integrity: sha512-vWNHOne0ZUavArqPP5LJta50+S8R261Fr5SvGul37HbEDcowvLjwdvd0ZeSr0r2lTSrPxl6okq9QUw8BFGiAxA==}
-
   node-domexception@1.0.0:
     resolution: {integrity: sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ==}
     engines: {node: '>=10.5.0'}
@@ -7113,11 +7100,6 @@ packages:
   node-releases@2.0.53:
     resolution: {integrity: sha512-D9UOmYG3UH1V+ENW56t5QXBwJw1YEY18ruVeus89Rw+SyIgjPkCO84bRzO3uNIYosJbNwiabWVn48o3uJLjxFQ==}
     engines: {node: '>=18'}
-
-  node@24.11.0:
-    resolution: {integrity: sha512-pGLc7hd4xh0doDpnHC5+PL09WLUDKFoBFsC28341AYhHjzTDbNSwY+2615tYY6YFO2WQUKit4yqTwzIHaaityg==}
-    engines: {npm: '>=5.0.0'}
-    hasBin: true
 
   npm-run-path@4.0.1:
     resolution: {integrity: sha512-S48WzZW777zhNIrn7gxOlISNAqi9ZC/uQFnRdbeIHhZhCA6UqpkOT8T1G7BvfdgP4Er8gF4sUbaS0i7QvIfCWw==}
@@ -14595,8 +14577,6 @@ snapshots:
 
   negotiator@1.0.0: {}
 
-  node-bin-setup@1.1.4: {}
-
   node-domexception@1.0.0: {}
 
   node-fetch@3.3.2:
@@ -14606,10 +14586,6 @@ snapshots:
       formdata-polyfill: 4.0.10
 
   node-releases@2.0.53: {}
-
-  node@24.11.0:
-    dependencies:
-      node-bin-setup: 1.1.4
 
   npm-run-path@4.0.1:
     dependencies:
