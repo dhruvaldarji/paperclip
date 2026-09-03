@@ -23,6 +23,7 @@ import {
   type NormalizedAcpForm,
 } from "../drivers/acpx/acp-question-adapter.js";
 import { openCodexAcpxRuntime } from "../drivers/acpx/codex-runtime-adapter.js";
+import { acpxProviderSessionIdentity } from "../drivers/acpx/recovery-identity.js";
 import {
   resolveQualifiedAcpxProfile,
   type QualifiedAcpxAgent,
@@ -282,7 +283,7 @@ async function dispatch(
       startedAt: new Date().toISOString(),
     });
     return {
-      identity: opened.identity,
+      identity: acpxProviderSessionIdentity(openedHost.identity()),
       sidecarPid: process.pid,
       status: opened.status,
     };
@@ -397,7 +398,7 @@ async function dispatch(
   if (request.command === "session.read") {
     const activeHost = requireHost();
     return {
-      identity: activeHost.identity(),
+      identity: acpxProviderSessionIdentity(activeHost.identity()),
       status: sanitizeRuntimeStatus(
         await readSidecarHostStatusWithin(activeHost),
       ),
@@ -406,7 +407,7 @@ async function dispatch(
   if (request.command === "session.snapshot") {
     const activeHost = requireHost();
     return {
-      identity: activeHost.identity(),
+      identity: acpxProviderSessionIdentity(activeHost.identity()),
       status: sanitizeRuntimeStatus(
         await readSidecarHostStatusWithin(activeHost),
       ),
@@ -425,7 +426,7 @@ async function dispatch(
     // still serialized, and retainActiveHostCleanup keeps admission closed
     // until one sequential close proves ownership was released.
     const activeHost = requireHost({ allowCleanupRetry: true });
-    const identity = activeHost.identity();
+    const identity = acpxProviderSessionIdentity(activeHost.identity());
     await closeSidecarHostForCommand(
       activeHost,
       boundedOptionalText(request.params.reason, "Paperclip suspension", 4_000),
