@@ -128,6 +128,26 @@ describe("ACPX runtime sandbox", () => {
     );
   });
 
+  it("removes a partially built root when preparation fails after claiming it", async () => {
+    const fixture = await sandboxFixture("codex");
+    const failure = new Error("simulated sandbox preparation failure");
+
+    await expect(
+      prepareAcpxRuntimeSandbox(
+        { binding: fixture.binding, agent: "codex" },
+        {
+          afterRootOwned: async () => {
+            throw failure;
+          },
+        },
+      ),
+    ).rejects.toBe(failure);
+
+    await expect(stat(fixture.binding.runtimeRoot)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it.runIf(process.platform !== "win32")(
     "repairs existing directory permissions through its no-follow handle",
     async () => {

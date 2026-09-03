@@ -14,6 +14,7 @@ import {
   readFile,
   realpath,
   rename,
+  rm,
   stat,
   unlink,
   type FileHandle,
@@ -38,6 +39,31 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_SANDBOX_ENVIRONMENT_BYTES = 512 * 1024;
 const MAX_WORKSPACE_RECORD_BYTES = 64 * 1024;
+
+interface AcpxRuntimeSandboxRootOwner {
+  readonly token: symbol;
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+// The runtime root path is deterministic per normalized session id, so a
+// path-only delete cannot prove a root still belongs to the admission that
+// created it. Each successful claim registers the current owner here,
+// keyed by root path. A later claim for the same path (a legitimate
+// re-opened session) replaces the entry. Cleanup for a stale owner checks
+// this registry and the captured directory identity before it deletes
+// anything, so a superseded owner's cleanup leaves a live root alone.
+const acpxRuntimeSandboxRootOwners = new Map<
+  string,
+  AcpxRuntimeSandboxRootOwner
+>();
+
+// Associates each returned sandbox object with the exact owner it was built
+// under, without exposing the ownership token on the public sandbox shape.
+const acpxRuntimeSandboxRootOwnerByResult = new WeakMap<
+  AcpxRuntimeSandbox,
+  AcpxRuntimeSandboxRootOwner & { readonly root: string }
+>();
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -200,7 +226,8 @@ export async function readAcpxRecoveryWorkspace(
       const lease: AcpxRecoveryWorkspaceLease = {
         path: physicalWorkspace,
         assertHeld() {
-          if (closed) throw new Error("ACPX recovery workspace lease is closed");
+          if (closed)
+            throw new Error("ACPX recovery workspace lease is closed");
           assertPinnedDirectory(
             physicalNamespace,
             physicalNamespace,
@@ -239,11 +266,7 @@ export async function readAcpxRecoveryWorkspace(
       await recordHandle.close();
     }
   } finally {
-    await closeRecoveryHandles([
-      workspaceHandle,
-      rootHandle,
-      namespaceHandle,
-    ]);
+    await closeRecoveryHandles([workspaceHandle, rootHandle, namespaceHandle]);
   }
 }
 
@@ -310,8 +333,7 @@ async function closeRecoveryHandles(
   );
   const errors = results
     .filter(
-      (result): result is PromiseRejectedResult =>
-        result.status === "rejected",
+      (result): result is PromiseRejectedResult => result.status === "rejected",
     )
     .map((result) => result.reason);
   if (errors.length > 0) {
@@ -319,12 +341,23 @@ async function closeRecoveryHandles(
   }
 }
 
+export interface AcpxRuntimeSandboxPrepareDependencies {
+  /**
+   * Internal test seam. Runs once the runtime root is claimed and owned,
+   * before the rest of the sandbox is built.
+   */
+  afterRootOwned?: () => Promise<void>;
+}
+
 /** Prepare the private filesystem and environment visible to an ACPX agent. */
-export async function prepareAcpxRuntimeSandbox(input: {
-  binding: AcpxRecoveryBinding;
-  agent: QualifiedAcpxAgent;
-  environment?: NodeJS.ProcessEnv;
-}): Promise<AcpxRuntimeSandbox> {
+export async function prepareAcpxRuntimeSandbox(
+  input: {
+    binding: AcpxRecoveryBinding;
+    agent: QualifiedAcpxAgent;
+    environment?: NodeJS.ProcessEnv;
+  },
+  dependencies: AcpxRuntimeSandboxPrepareDependencies = {},
+): Promise<AcpxRuntimeSandbox> {
   const expectedRoot = input.binding.runtimeRoot;
   if (resolve(expectedRoot) !== expectedRoot) {
     throw new Error("ACPX runtime root must be an absolute normalized path");
@@ -343,97 +376,198 @@ export async function prepareAcpxRuntimeSandbox(input: {
     expectedRoot,
     physicalAcpxDirectory,
   );
-  const stateDirectory = await ensurePrivateDirectory(
-    join(root, "acpx-state"),
-    root,
-  );
-  const homeDirectory = await ensurePrivateDirectory(join(root, "home"), root);
-  const configDirectory = await ensurePrivateDirectory(
-    join(root, "config"),
-    root,
-  );
-  const dataDirectory = await ensurePrivateDirectory(join(root, "data"), root);
-  const cacheDirectory = await ensurePrivateDirectory(
-    join(root, "cache"),
-    root,
-  );
-  const agentHomeDirectory = await ensurePrivateDirectory(
-    join(root, `${input.agent}-home`),
-    root,
-  );
-  const workspaceRecordPath = join(root, "workspace");
-  await writePrivateFile(
-    workspaceRecordPath,
-    `${input.binding.workspacePath}\n`,
-  );
-  if (input.agent === "pi") {
-    await writePrivateFile(
-      join(agentHomeDirectory, "settings.json"),
-      `${JSON.stringify({
-        quietStartup: true,
-        defaultProjectTrust: "never",
-        enableInstallTelemetry: false,
-      })}\n`,
+  // Claim ownership as soon as the root exists, before any slower step (a
+  // credential write, a later directory sync) can run. A later admission for
+  // the same deterministic path claims this same record and supersedes it;
+  // an aborted admission's own late cleanup then finds it is no longer the
+  // registered owner and leaves the live root alone.
+  const owner = await claimAcpxRuntimeSandboxRoot(root);
+  try {
+    await dependencies.afterRootOwned?.();
+    const stateDirectory = await ensurePrivateDirectory(
+      join(root, "acpx-state"),
+      root,
     );
-  }
+    const homeDirectory = await ensurePrivateDirectory(
+      join(root, "home"),
+      root,
+    );
+    const configDirectory = await ensurePrivateDirectory(
+      join(root, "config"),
+      root,
+    );
+    const dataDirectory = await ensurePrivateDirectory(
+      join(root, "data"),
+      root,
+    );
+    const cacheDirectory = await ensurePrivateDirectory(
+      join(root, "cache"),
+      root,
+    );
+    const agentHomeDirectory = await ensurePrivateDirectory(
+      join(root, `${input.agent}-home`),
+      root,
+    );
+    const workspaceRecordPath = join(root, "workspace");
+    await writePrivateFile(
+      workspaceRecordPath,
+      `${input.binding.workspacePath}\n`,
+    );
+    if (input.agent === "pi") {
+      await writePrivateFile(
+        join(agentHomeDirectory, "settings.json"),
+        `${JSON.stringify({
+          quietStartup: true,
+          defaultProjectTrust: "never",
+          enableInstallTelemetry: false,
+        })}\n`,
+      );
+    }
 
-  const sanitizedSpawnInput = createSanitizedAcpxSpawnInput(
-    input.environment,
-    input.agent,
-  );
-  // The sanitizer deliberately returns an opaque, frozen launch boundary.
-  // Build the sandbox-owned mutable copy only from that projected environment
-  // before adding paths that were created and validated above.
-  const launchEnvironment: NodeJS.ProcessEnv = {
-    ...sanitizedSpawnInput.env,
+    const sanitizedSpawnInput = createSanitizedAcpxSpawnInput(
+      input.environment,
+      input.agent,
+    );
+    // The sanitizer deliberately returns an opaque, frozen launch boundary.
+    // Build the sandbox-owned mutable copy only from that projected
+    // environment before adding paths that were created and validated above.
+    const launchEnvironment: NodeJS.ProcessEnv = {
+      ...sanitizedSpawnInput.env,
+    };
+    Object.assign(launchEnvironment, {
+      HOME: homeDirectory,
+      XDG_CONFIG_HOME: configDirectory,
+      XDG_DATA_HOME: dataDirectory,
+      XDG_CACHE_HOME: cacheDirectory,
+      PAPERCLIP_ACPX_PROFILE: input.agent,
+      PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1",
+      ...(input.agent === "pi"
+        ? {
+            PI_CODING_AGENT_DIR: agentHomeDirectory,
+            PI_SKIP_VERSION_CHECK: "1",
+            PI_TELEMETRY: "0",
+          }
+        : {}),
+      ...(input.agent === "claude"
+        ? { CLAUDE_CONFIG_DIR: agentHomeDirectory }
+        : {}),
+      ...(input.agent === "codex"
+        ? {
+            CODEX_HOME: agentHomeDirectory,
+            NO_BROWSER: "1",
+            ...(launchEnvironment.CODEX_API_KEY ||
+            launchEnvironment.OPENAI_API_KEY
+              ? {
+                  DEFAULT_AUTH_REQUEST: JSON.stringify({
+                    methodId: "api-key",
+                  }),
+                }
+              : {}),
+          }
+        : {}),
+    });
+    validateEnvironmentSize(launchEnvironment);
+    const persistedEnvironment = Object.fromEntries(
+      Object.entries(launchEnvironment).filter(
+        ([name, value]) =>
+          typeof value === "string" && isPersistableEnvironmentName(name),
+      ),
+    );
+    const sandbox: AcpxRuntimeSandbox = {
+      root,
+      stateDirectory,
+      homeDirectory,
+      configDirectory,
+      dataDirectory,
+      cacheDirectory,
+      agentHomeDirectory,
+      workspaceRecordPath,
+      launchEnvironment: Object.freeze({ ...launchEnvironment }),
+      persistedEnvironment: Object.freeze(persistedEnvironment),
+    };
+    acpxRuntimeSandboxRootOwnerByResult.set(sandbox, { ...owner, root });
+    return sandbox;
+  } catch (error) {
+    let cleanupError: unknown = null;
+    try {
+      await revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(root, owner);
+    } catch (thrown) {
+      cleanupError = thrown;
+    }
+    if (cleanupError !== null) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "ACPX sandbox preparation failed and its partial root could not be removed",
+      );
+    }
+    throw error;
+  }
+}
+
+async function claimAcpxRuntimeSandboxRoot(
+  root: string,
+): Promise<AcpxRuntimeSandboxRootOwner> {
+  const entry = await lstat(root, { bigint: true });
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error("ACPX sandbox root must be a real directory");
+  }
+  const owner: AcpxRuntimeSandboxRootOwner = {
+    token: Symbol("acpx-sandbox-root-owner"),
+    dev: entry.dev,
+    ino: entry.ino,
   };
-  Object.assign(launchEnvironment, {
-    HOME: homeDirectory,
-    XDG_CONFIG_HOME: configDirectory,
-    XDG_DATA_HOME: dataDirectory,
-    XDG_CACHE_HOME: cacheDirectory,
-    PAPERCLIP_ACPX_PROFILE: input.agent,
-    PAPERCLIP_ACPX_ISOLATED_CONTEXT: "1",
-    ...(input.agent === "pi"
-      ? {
-          PI_CODING_AGENT_DIR: agentHomeDirectory,
-          PI_SKIP_VERSION_CHECK: "1",
-          PI_TELEMETRY: "0",
-        }
-      : {}),
-    ...(input.agent === "claude"
-      ? { CLAUDE_CONFIG_DIR: agentHomeDirectory }
-      : {}),
-    ...(input.agent === "codex"
-      ? {
-          CODEX_HOME: agentHomeDirectory,
-          NO_BROWSER: "1",
-          ...(launchEnvironment.CODEX_API_KEY ||
-          launchEnvironment.OPENAI_API_KEY
-            ? { DEFAULT_AUTH_REQUEST: JSON.stringify({ methodId: "api-key" }) }
-            : {}),
-        }
-      : {}),
-  });
-  validateEnvironmentSize(launchEnvironment);
-  const persistedEnvironment = Object.fromEntries(
-    Object.entries(launchEnvironment).filter(
-      ([name, value]) =>
-        typeof value === "string" && isPersistableEnvironmentName(name),
-    ),
-  );
-  return {
-    root,
-    stateDirectory,
-    homeDirectory,
-    configDirectory,
-    dataDirectory,
-    cacheDirectory,
-    agentHomeDirectory,
-    workspaceRecordPath,
-    launchEnvironment: Object.freeze({ ...launchEnvironment }),
-    persistedEnvironment: Object.freeze(persistedEnvironment),
-  };
+  acpxRuntimeSandboxRootOwners.set(root, owner);
+  return owner;
+}
+
+async function revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
+  root: string,
+  owner: AcpxRuntimeSandboxRootOwner,
+): Promise<void> {
+  const current = acpxRuntimeSandboxRootOwners.get(root);
+  if (current === undefined || current.token !== owner.token) {
+    // A later admission has since claimed this deterministic root. It is
+    // live; a superseded owner must never delete it.
+    return;
+  }
+  let entry: BigIntStats;
+  try {
+    entry = await lstat(root, { bigint: true });
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      acpxRuntimeSandboxRootOwners.delete(root);
+      return;
+    }
+    throw error;
+  }
+  if (
+    entry.isSymbolicLink() ||
+    !entry.isDirectory() ||
+    entry.dev !== owner.dev ||
+    entry.ino !== owner.ino
+  ) {
+    throw new Error("ACPX sandbox root identity changed before cleanup");
+  }
+  await rm(root, { recursive: true });
+  if (acpxRuntimeSandboxRootOwners.get(root) === current) {
+    acpxRuntimeSandboxRootOwners.delete(root);
+  }
+}
+
+/**
+ * Remove a sandbox root through the exact ownership capability that created
+ * it. Revalidates the root's directory identity and refuses the delete when
+ * a later admission has since claimed the same deterministic path or the
+ * identity no longer matches.
+ */
+export async function removeOwnedAcpxRuntimeSandboxRoot(
+  sandbox: AcpxRuntimeSandbox,
+): Promise<void> {
+  const owner = acpxRuntimeSandboxRootOwnerByResult.get(sandbox);
+  if (!owner) {
+    throw new Error("ACPX sandbox root ownership capability is unavailable");
+  }
+  await revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(owner.root, owner);
 }
 
 async function ensurePrivateDirectory(

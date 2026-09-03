@@ -39,6 +39,7 @@ import {
 } from "./recovery-identity.js";
 import {
   prepareAcpxRuntimeSandbox,
+  removeOwnedAcpxRuntimeSandboxRoot,
   type AcpxRuntimeSandbox,
 } from "./runtime-sandbox.js";
 import type { AcpxExpectedSessionIdentity } from "./sidecar-protocol.js";
@@ -130,7 +131,8 @@ export interface AcpxRetainedCleanupFailure {
     | "provider_lifetime"
     | "command"
     | "runtime"
-    | "tool_bridge";
+    | "tool_bridge"
+    | "sandbox";
   attempt: number;
   error: unknown;
 }
@@ -141,6 +143,8 @@ export interface AcpxRuntimeHostDependencies {
   ) => Promise<VerifiedAcpxInstallation>;
   /** Internal test seam for aborting credential acquisition. */
   stageCredential?: typeof stageManagedCodexCredential;
+  /** Internal test seam for aborting sandbox preparation. */
+  prepareSandbox?: typeof prepareAcpxRuntimeSandbox;
   openRuntime(options: AcpxRuntimePortOpenOptions): Promise<AcpxRuntimePort>;
   /** Internal test seam for the post-handshake admission deadline. */
   admissionVerificationTimeoutMs?: number;
@@ -324,13 +328,20 @@ export class AcpxRuntimeHost {
       retainRuntimeHostCleanup(ownedCleanup);
     };
     try {
-      const sandbox = await runAbortableAdmissionStage(options.signal, () =>
-        prepareAcpxRuntimeSandbox({
-          binding,
-          agent: options.agent,
-          environment: options.environment,
-        }),
-      );
+      const sandbox = await acquireAbortableAdmissionResource({
+        signal: options.signal,
+        acquire: () =>
+          (dependencies.prepareSandbox ?? prepareAcpxRuntimeSandbox)({
+            binding,
+            agent: options.agent,
+            environment: options.environment,
+          }),
+        resource: "sandbox",
+        releaseLate: (lateSandbox) =>
+          removeOwnedAcpxRuntimeSandboxRoot(lateSandbox),
+        reportFailure: (failure) =>
+          dependencies.reportRetainedCleanupFailure(failure),
+      });
       if (options.agent === "codex") {
         credential = await acquireAbortableAdmissionResource({
           signal: options.signal,
