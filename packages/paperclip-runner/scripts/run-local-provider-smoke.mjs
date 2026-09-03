@@ -4,6 +4,8 @@ import { access, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
+import { withIsolatedProfileCredentials } from "./local-provider-smoke-environment.mjs";
+
 const PROFILE_IDS = [
   "runner-acpx-claude",
   "runner-acpx-codex",
@@ -244,12 +246,14 @@ try {
       liveCandidate(profile, RUNNER_LIVE_CANDIDATE_SLOTS),
     ]),
   );
+  const credentialsByProfile = new Map();
   for (const [profile, candidate] of candidates) {
     if (!candidate) throw new Error(`Missing live candidate for ${profile}`);
     const missingCredentials = [];
+    const profileCredentials = {};
     for (const name of candidate.qualification.requiredEnvironment) {
       const value = ambientEnvironment[name]?.trim();
-      if (value) process.env[name] = value;
+      if (value) profileCredentials[name] = value;
       else missingCredentials.push(name);
     }
     if (missingCredentials.length > 0) {
@@ -257,13 +261,16 @@ try {
         `${profile} requires ${missingCredentials.join(", ")} in the smoke process environment`,
       );
     }
+    credentialsByProfile.set(profile, profileCredentials);
   }
+  const providerCredentialNames = new Set(
+    [...credentialsByProfile.values()].flatMap((credentials) =>
+      Object.keys(credentials),
+    ),
+  );
   const credentialValues = new Set(
-    [...candidates.values()].flatMap((candidate) =>
-      candidate.qualification.requiredEnvironment.flatMap((name) => {
-        const value = ambientEnvironment[name]?.trim();
-        return value ? [value] : [];
-      }),
+    [...credentialsByProfile.values()].flatMap((credentials) =>
+      Object.values(credentials),
     ),
   );
   const evalCase = runnerWorkflowCase("completion-robustness");
@@ -283,18 +290,24 @@ try {
       budget: candidate.budget,
     };
     try {
-      const observation = await executeLiveRunnerWorkflow({
-        entry,
-        candidate,
-        evalCase,
-        workingDirectory: workspace,
-        // This smoke proves the provider launch/message/semantic-terminal path.
-        // Usage conformance remains covered by the dedicated eval campaign.
-        allowMissingUsage: true,
-        expectedAssistantText: "PAPERCLIP_LOCAL_PROVIDER_SMOKE_OK",
-        promptOverride:
-          "Reply with exactly PAPERCLIP_LOCAL_PROVIDER_SMOKE_OK and no other text. Do not call tools.",
-        runnerBinary: runnerd,
+      const observation = await withIsolatedProfileCredentials({
+        environment: process.env,
+        providerCredentialNames,
+        profileCredentials: credentialsByProfile.get(profile),
+        run: () =>
+          executeLiveRunnerWorkflow({
+            entry,
+            candidate,
+            evalCase,
+            workingDirectory: workspace,
+            // This smoke proves the provider launch/message/semantic-terminal path.
+            // Usage conformance remains covered by the dedicated eval campaign.
+            allowMissingUsage: true,
+            expectedAssistantText: "PAPERCLIP_LOCAL_PROVIDER_SMOKE_OK",
+            promptOverride:
+              "Reply with exactly PAPERCLIP_LOCAL_PROVIDER_SMOKE_OK and no other text. Do not call tools.",
+            runnerBinary: runnerd,
+          }),
       });
       const failures = failedChecks(observation);
       const passed = failures.length === 0;
