@@ -135,6 +135,11 @@ fn prepare_payload(directory: &Path, agent: &str) -> Value {
 
 fn prepare_payload_with_mode(directory: &Path, agent: &str, mode: &str) -> Value {
     let operations = Vec::new();
+    let (runtime_package, runtime_version) = if agent == "codex" {
+        (json!("@openai/codex"), json!("0.148.0"))
+    } else {
+        (Value::Null, Value::Null)
+    };
     json!({
         "authorizedTools": {
             "schema": "paperclip.runner.authorized-tools.v1",
@@ -152,8 +157,8 @@ fn prepare_payload_with_mode(directory: &Path, agent: &str, mode: &str) -> Value
             "acpxVersion": "0.13.1",
             "agentServerPackage": "@agentclientprotocol/codex-acp",
             "agentServerVersion": "1.6.2",
-            "agentRuntimePackage": null,
-            "agentRuntimeVersion": null,
+            "agentRuntimePackage": runtime_package,
+            "agentRuntimeVersion": runtime_version,
             "commandDigest": CODEX_ACPX_DIGEST,
             "sidecarCommand": env!("CARGO_BIN_EXE_fake-acpx-sidecar"),
             "sidecarArgs": [
