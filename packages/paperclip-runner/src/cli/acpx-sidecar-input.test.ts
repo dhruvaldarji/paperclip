@@ -144,6 +144,10 @@ describe("ACPX sidecar input sequencing", () => {
       ],
       "runtime initialization cleanup failed",
     );
+    const codedWrapper = Object.assign(new Error("opaque wrapper"), {
+      code: "ERR_UNCLASSIFIED_WRAPPER",
+      cause: missingModule,
+    });
 
     expect(acpxSidecarErrorCode(missingModule)).toBe(
       "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
@@ -156,6 +160,9 @@ describe("ACPX sidecar input sequencing", () => {
     );
     expect(acpxSidecarErrorCode(model)).toBe("ACP_MODEL_UNSUPPORTED");
     expect(acpxSidecarErrorCode(genericStartup)).toBe(
+      "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
+    );
+    expect(acpxSidecarErrorCode(codedWrapper)).toBe(
       "AGENT_STARTUP_FAILED.MODULE_NOT_FOUND",
     );
     expect(acpxSidecarErrorCode(nestedHandshake)).toBe(
