@@ -65,7 +65,7 @@ jobs:
           SELECT_ID: ${{ inputs.id }}
         run: |
           set -euo pipefail
-          validation_ref="refs/heads/validation/runner-local-integrity-e2e"
+          validation_ref="refs/heads/validation/runner-paid-matrix-integrity-v5"
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
             if [ "$REF" != "$validation_ref" ] || [ "$EVENT_NAME" != workflow_dispatch ] || [ "${SELECT_ALL:-false}" = true ]; then
               echo "Non-default refs may run only the pinned scoped repair matrix from the validation branch." >&2
@@ -320,7 +320,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
-            test "$REF" = "refs/heads/validation/runner-local-integrity-e2e"
+            test "$REF" = "refs/heads/validation/runner-paid-matrix-integrity-v5"
             case "$EXECUTION_ID" in
               core-compatibility.runner-codex.local.message-marker|core-compatibility.runner-codex.local.plan-revise-accept|core-compatibility.runner-acpx-codex.local.message-marker|core-compatibility.runner-opencode.local.message-marker|local-session-integrity.legacy-claude.local.structured-question-resume|local-session-integrity.runner-opencode.local.structured-question-restart-resume|local-session-integrity.runner-acpx-claude.local.structured-question-restart-resume|local-session-integrity.runner-acpx-codex.local.structured-question-restart-resume) ;;
               *) echo "Execution is outside the pinned scoped repair matrix." >&2; exit 1 ;;
