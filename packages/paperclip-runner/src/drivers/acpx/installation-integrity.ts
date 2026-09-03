@@ -295,7 +295,7 @@ export function createAcpxPackageJsonResolver(
       );
     }
     const packageJsonPath = realpathSync(
-      createRequire(canonicalIssuer).resolve(`${packageName}/package.json`),
+      resolvePackageJsonFromIssuer(packageName, canonicalIssuer),
     );
     if (!pathIsInside(canonicalNodeModules, packageJsonPath)) {
       throw new Error(
@@ -304,6 +304,44 @@ export function createAcpxPackageJsonResolver(
     }
     return packageJsonPath;
   };
+}
+
+function resolvePackageJsonFromIssuer(
+  packageName: string,
+  issuerPackageJsonPath: string,
+): string {
+  const issuerRequire = createRequire(issuerPackageJsonPath);
+  try {
+    return issuerRequire.resolve(`${packageName}/package.json`);
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code !== "ERR_PACKAGE_PATH_NOT_EXPORTED"
+    )
+      throw error;
+  }
+
+  const packageSegments = packageName.split("/");
+  if (
+    packageSegments.length < 1 ||
+    packageSegments.length > 2 ||
+    packageSegments.some((segment) => segment.length === 0)
+  ) {
+    throw new Error(`ACPX provider package name is invalid: ${packageName}`);
+  }
+  let directory = dirname(realpathSync(issuerRequire.resolve(packageName)));
+  for (let count = 0; count < MAX_DEPENDENCY_ANCESTORS; count += 1) {
+    const matchesPackage =
+      basename(directory) === packageSegments.at(-1) &&
+      (packageSegments.length === 1 ||
+        basename(dirname(directory)) === packageSegments[0]);
+    if (matchesPackage) return resolve(directory, "package.json");
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error(
+    `ACPX provider package manifest could not be located for ${packageName}`,
+  );
 }
 
 function pathIsInside(root: string, candidate: string): boolean {
