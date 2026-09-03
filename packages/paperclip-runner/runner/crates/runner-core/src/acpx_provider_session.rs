@@ -865,12 +865,13 @@ fn reserved_terminal_tool_set() -> Result<AuthorizedToolSet, LocalRunnerError> {
     })
 }
 
-fn sidecar_tool_operations(
-    run_tool_set: &AuthorizedToolSet,
-) -> Result<Vec<AuthorizedTool>, LocalRunnerError> {
-    let mut operations = run_tool_set.operations.clone();
-    operations.extend(reserved_terminal_tool_set()?.operations);
-    Ok(operations)
+fn sidecar_run_tool_operations(run_tool_set: &AuthorizedToolSet) -> Vec<AuthorizedTool> {
+    // The authenticated TypeScript bridge installs the trusted terminal tools
+    // itself and rejects caller attempts to replace either reserved schema.
+    // Send only the attached run catalog across this boundary; Rust keeps its
+    // independent reserved receipt ledger and validates terminal values after
+    // the sidecar reports them.
+    run_tool_set.operations.clone()
 }
 
 fn validate_prp_run_result(value: &Value) -> Result<(), LocalRunnerError> {
@@ -902,7 +903,7 @@ fn bootstrap(
     transport: &mut AcpxSidecarTransport,
     config: &AcpxProviderSessionConfig,
 ) -> Result<(AcpxProviderSessionIdentity, AcpxProviderState), LocalRunnerError> {
-    let sidecar_tools = sidecar_tool_operations(&config.tool_set)?;
+    let sidecar_tools = sidecar_run_tool_operations(&config.tool_set);
     let initialized = transport.request(
         GeneratedAcpxSidecarCommand::Initialize,
         json!({"agent": config.agent, "model": config.model}),
@@ -1137,7 +1138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidecar_catalog_combines_run_tools_with_trusted_terminal_tools() {
+    fn sidecar_catalog_leaves_reserved_terminal_tools_to_the_trusted_bridge() {
         let operations = vec![AuthorizedTool {
             operation_id: "get_task_context".to_owned(),
             version: 1,
@@ -1152,20 +1153,15 @@ mod tests {
             operations,
         };
 
-        let sidecar_tools = sidecar_tool_operations(&run_tool_set).unwrap();
+        let sidecar_tools = sidecar_run_tool_operations(&run_tool_set);
         assert_eq!(
             sidecar_tools
                 .iter()
                 .map(|tool| tool.operation_id.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "get_task_context",
-                PRP_COMPLETION_TOOL_NAME,
-                PRP_BLOCK_TOOL_NAME,
-            ]
+            vec!["get_task_context"]
         );
         assert_eq!(run_tool_set.operations.len(), 1);
-        assert!(sidecar_tools[1].input_schema.is_object());
-        assert!(sidecar_tools[2].input_schema.is_object());
+        assert!(sidecar_tools[0].input_schema.is_object());
     }
 }
