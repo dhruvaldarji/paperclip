@@ -440,7 +440,7 @@ jobs:
                       "model": "gpt-5.6-sol",
                       "permissionMode": "approve-all",
                       "permissionModePinned": True,
-                      "systemInstructions": "Descriptor launch probe.",
+                      "systemInstructions": "",
                       "runtimeContext": None,
                       "tools": [],
                   },
