@@ -199,26 +199,39 @@ describe("Codex ACPX runtime adapter", () => {
     expect(assertWorkspaceHeld).toHaveBeenCalledOnce();
     expect(command.spawn).not.toHaveBeenCalled();
   });
-  it("maps status, model selection, and state-preserving close", async () => {
+  it("reads verified status from durable state without draining live updates", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(runtime.getStatus!).mockResolvedValue({
-      models: {
-        currentModelId: "gpt-5.6-sol",
-        availableModelIds: ["gpt-5.6-sol"],
+    vi.mocked(runtime.getStatus!).mockReturnValue(new Promise(() => {}));
+    const durableRecord = {
+      acpxRecordId: "record-1",
+      acpSessionId: "backend-1",
+      agentSessionId: "agent-1",
+      acpx: {
+        current_model_id: "gpt-5.6-sol",
+        available_models: ["gpt-5.6-sol"],
       },
-    });
+    } as never;
+    const durableStore: AcpSessionStore = {
+      load: vi.fn(async () => structuredClone(durableRecord)),
+      save: vi.fn(),
+    };
     const port = await openCodexAcpxRuntime(openOptions(fakeCommand()), {
       createRegistry: () => registry(),
-      createStore: () => store(),
+      createStore: () => durableStore,
       createRuntime: () => runtime,
     });
 
-    expect(await port.getStatus()).toEqual({
+    expect(await port.getStatus()).toMatchObject({
+      acpxRecordId: "record-1",
+      backendSessionId: "backend-1",
+      agentSessionId: "agent-1",
       models: {
         currentModelId: "gpt-5.6-sol",
         availableModelIds: ["gpt-5.6-sol"],
       },
     });
+    expect(durableStore.load).toHaveBeenCalledWith("record-1");
+    expect(runtime.getStatus).not.toHaveBeenCalled();
     await port.setModel?.("gpt-5.6-sol");
     expect(runtime.setConfigOption).toHaveBeenCalledWith({
       handle: HANDLE,
