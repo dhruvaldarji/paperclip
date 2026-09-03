@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const fullStackTestNeeds =
-  /needs:\s*\[\s*authorize,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,\s*build_remote_provider_pack,?\s*\]/u;
+  /needs:\s*\[\s*authorize,\s*target_lock,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,\s*build_remote_provider_pack,?\s*\]/u;
+const buildRunnerNeeds =
+  /needs:\s*\[\s*authorize,\s*target_lock,\s*catalog,?\s*\]/u;
+const buildRemoteProviderPackNeeds =
+  /needs:\s*\[\s*authorize,\s*target_lock,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,?\s*\]/u;
 
 describe("public repository paid workflow security", () => {
   it("gates every provider-secret job with stable actor IDs", async () => {
@@ -68,6 +72,10 @@ describe("public repository paid workflow security", () => {
     );
     const authorizeJob = fullStack.slice(
       fullStack.indexOf("  authorize:"),
+      fullStack.indexOf("  target_lock:"),
+    );
+    const targetLockJob = fullStack.slice(
+      fullStack.indexOf("  target_lock:"),
       fullStack.indexOf("  catalog:"),
     );
     expect(authorizeJob).toContain(
@@ -84,13 +92,44 @@ describe("public repository paid workflow security", () => {
       "repos/$REPOSITORY/branches/$encoded_branch",
     );
     expect(authorizeJob).toContain('echo "sha=$target_sha"');
+    expect(authorizeJob).not.toContain("actions/checkout@");
+    expect(authorizeJob).not.toContain("pnpm install");
+    expect(targetLockJob).toContain("name: Resolve target pnpm lockfile");
+    expect(targetLockJob).toContain("needs: authorize");
+    expect(targetLockJob).toContain(
+      "ref: ${{ needs.authorize.outputs.target_sha }}",
+    );
+    expect(targetLockJob).toContain("persist-credentials: false");
+    expect(targetLockJob).toContain(
+      "pnpm install --ignore-scripts --no-frozen-lockfile --lockfile-only",
+    );
+    expect(targetLockJob).toContain(
+      "artifact_id: ${{ steps.upload.outputs.artifact-id }}",
+    );
+    expect(targetLockJob).toContain("lock_sha256:");
+    expect(targetLockJob).toContain(
+      "runner-e2e-target-pnpm-lock-${{ github.run_id }}-${{ github.run_attempt }}",
+    );
+    expect(targetLockJob).not.toContain("name: runner-e2e-paid");
+    expect(targetLockJob).not.toMatch(
+      /(?:OPENAI|ANTHROPIC|OPENROUTER|DAYTONA)_API_KEY/,
+    );
     expect(paidJob).toContain(
       "runs-on: ${{ needs.authorize.outputs.test_runner }}",
     );
     expect(paidJob).toMatch(fullStackTestNeeds);
     expect(paidJob).toContain("name: runner-e2e-paid");
     expect(paidJob).toMatch(
-      /Reauthorize paid execution before provider access[\s\S]*actions\/checkout@[0-9a-f]{40}[\s\S]*persist-credentials: false/,
+      /Reauthorize paid execution before provider access[\s\S]*actions\/checkout@[0-9a-f]{40}[\s\S]*persist-credentials: false[\s\S]*Download resolved target lockfile/,
+    );
+    const paidInstall = paidJob.indexOf(
+      "pnpm install --frozen-lockfile --ignore-scripts",
+    );
+    const paidExecution = paidJob.indexOf("- name: Run paid cell");
+    expect(paidInstall).toBeGreaterThan(0);
+    expect(paidExecution).toBeGreaterThan(paidInstall);
+    expect(paidJob.slice(0, paidExecution)).not.toMatch(
+      /secrets\.(?:OPENAI|ANTHROPIC|OPENROUTER|DAYTONA)_API_KEY/,
     );
     expect(authorizeJob).toContain('echo "max_parallel_limit=100"');
     expect(fullStack).toContain('[ "$MAX_PARALLEL_LIMIT" -gt 100 ]');
@@ -103,13 +142,64 @@ describe("public repository paid workflow security", () => {
     expect(fullStack).toContain(
       "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch != '' && inputs.target_branch != github.event.repository.default_branch }}",
     );
+    const targetCodeJobs = [
+      fullStack.slice(
+        fullStack.indexOf("  catalog:"),
+        fullStack.indexOf("  daytona_image:"),
+      ),
+      fullStack.slice(
+        fullStack.indexOf("  daytona_image:"),
+        fullStack.indexOf("  build_runner_artifacts:"),
+      ),
+      fullStack.slice(
+        fullStack.indexOf("  build_runner_artifacts:"),
+        fullStack.indexOf("  build_remote_provider_pack:"),
+      ),
+      fullStack.slice(
+        fullStack.indexOf("  build_remote_provider_pack:"),
+        fullStack.indexOf("  test:"),
+      ),
+      paidJob,
+    ];
+    for (const targetCodeJob of targetCodeJobs) {
+      const checkout = targetCodeJob.indexOf("actions/checkout@");
+      const downloadLock = targetCodeJob.indexOf(
+        "Download resolved target lockfile",
+      );
+      const restoreLock = targetCodeJob.indexOf(
+        "Restore resolved target lockfile",
+      );
+      const setupNode = targetCodeJob.indexOf("actions/setup-node@");
+      const install = targetCodeJob.indexOf("pnpm install --frozen-lockfile");
+      expect(checkout).toBeGreaterThan(0);
+      expect(downloadLock).toBeGreaterThan(checkout);
+      expect(restoreLock).toBeGreaterThan(downloadLock);
+      if (setupNode >= 0) {
+        expect(setupNode).toBeGreaterThan(restoreLock);
+      }
+      if (install >= 0) {
+        expect(install).toBeGreaterThan(restoreLock);
+      }
+      expect(targetCodeJob).toContain(
+        "artifact-ids: ${{ needs.target_lock.outputs.artifact_id }}",
+      );
+      expect(targetCodeJob).toContain(
+        "EXPECTED_LOCK_SHA256: ${{ needs.target_lock.outputs.lock_sha256 }}",
+      );
+    }
+    expect(fullStack.match(/Download resolved target lockfile/g)).toHaveLength(
+      5,
+    );
+    expect(fullStack.match(/Restore resolved target lockfile/g)).toHaveLength(
+      5,
+    );
     expect(
       fullStack.match(
         /ref: \$\{\{ needs\.authorize\.outputs\.target_sha \}\}/g,
       ),
-    ).toHaveLength(5);
+    ).toHaveLength(6);
     expect(fullStack.match(/ref: \$\{\{ github\.sha \}\}/g)).toHaveLength(2);
-    expect(fullStack.match(/persist-credentials: false/g)).toHaveLength(7);
+    expect(fullStack.match(/persist-credentials: false/g)).toHaveLength(8);
     expect(fullStack).not.toContain("ref: ${{ inputs.target_branch }}");
     expect(fullStack).toContain(
       "PAPERCLIP_RUNNER_SOURCE_REVISION=${TARGET_SHA}",
@@ -123,10 +213,12 @@ describe("public repository paid workflow security", () => {
     expect(reportJob).not.toContain(
       "ref: ${{ needs.authorize.outputs.target_sha }}",
     );
+    expect(reportJob).not.toContain("Download resolved target lockfile");
     expect(historyJob).toContain("ref: ${{ github.sha }}");
     expect(historyJob).not.toContain(
       "ref: ${{ needs.authorize.outputs.target_sha }}",
     );
+    expect(historyJob).not.toContain("Download resolved target lockfile");
     expect(fullStack).toContain(
       "if: always() && !cancelled() && needs.catalog.result == 'success'",
     );
@@ -201,10 +293,8 @@ describe("public repository paid workflow security", () => {
 
     expect(buildJobStart).toBeGreaterThan(0);
     expect(testJobStart).toBeGreaterThan(buildJobStart);
-    expect(buildJob).toContain("needs: [authorize, catalog]");
-    expect(buildJob).toContain(
-      "needs: [authorize, catalog, daytona_image, build_runner_artifacts]",
-    );
+    expect(buildJob).toMatch(buildRunnerNeeds);
+    expect(buildJob).toMatch(buildRemoteProviderPackNeeds);
     expect(buildJob).not.toContain("environment:");
     expect(buildJob).not.toContain("secrets.");
     expect(buildJob).toContain(

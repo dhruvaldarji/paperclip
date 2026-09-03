@@ -274,12 +274,21 @@ auto-stop/archive/delete values remain as cancellation backstops.
 never runs for a pull request or ordinary push. Start the trusted workflow from
 the default branch. A CODEOWNER can set the optional `target_branch` input to
 any branch in `paperclipai/paperclip`. The authorization job resolves that
-branch to one immutable commit before any checkout. Catalog, image, and paid
-test jobs check out that exact commit. Report sanitization and AWS history
-publication explicitly check out the trusted workflow commit. The workflow
-definition, runner-group permission, and protected-environment deployment still
-come from the default branch. Do not select the target branch in GitHub's **Use
-workflow from** control.
+branch to one immutable commit before any checkout. A separate credential-free
+job checks out the resolved commit and regenerates `pnpm-lock.yaml` once with
+`--ignore-scripts --no-frozen-lockfile --lockfile-only`. It uploads that exact
+lockfile under a run-attempt-scoped artifact ID and records its SHA-256.
+Catalog, image, shared-build, provider-pack, and paid test jobs download the
+artifact by ID, verify its digest, and restore it before setup or a frozen
+install. The paid test job disables dependency lifecycle scripts, and provider
+secrets are introduced only in the final test step. This permits an authorized
+target branch to exercise an intentionally uncommitted workspace patch while
+keeping every target job on one identical dependency resolution. Report
+sanitization and AWS history publication do not consume the target lockfile;
+they explicitly check out and install from the trusted workflow commit. The
+workflow definition, runner-group permission, and protected-environment
+deployment still come from the default branch. Do not select the target branch
+in GitHub's **Use workflow from** control.
 
 Because this repository is public, manual campaigns fail before checkout unless
 the trusted workflow runs from the default branch and both the original actor
