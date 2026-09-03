@@ -291,9 +291,21 @@ pub fn run_durable_runner<E: CommandExecutor>(
                 break;
             }
         }
-        if !disconnected && send_outbox(&mut transport, &state, &mut sent_source_seq).is_err() {
-            state.record_diagnostic("outbox delivery failed; unacknowledged suffix will replay");
-            disconnected = true;
+        if !disconnected {
+            if let Err(error) = send_outbox(&mut transport, &state, &mut sent_source_seq) {
+                state.record_diagnostic(
+                    "outbox delivery failed; unacknowledged suffix remains durable",
+                );
+                if lifecycle_after_reply.durable_state().is_some() {
+                    // The terminal result was delivered above. Never reconnect
+                    // this process and overwrite its durable terminal state as
+                    // ready merely to retry a later outbox frame.
+                    store.save(&state)?;
+                    let _ = executor.shutdown();
+                    return Err(error);
+                }
+                disconnected = true;
+            }
         }
         if let Some(durable_lifecycle) = lifecycle_after_reply
             .durable_state()
@@ -382,14 +394,29 @@ pub fn run_durable_runner<E: CommandExecutor>(
                             durable_lifecycle,
                         )?;
                     }
-                    let delivery = transport
-                        .send_json(&command_result_envelope(&state, &result))
-                        .and_then(|()| send_outbox(&mut transport, &state, &mut sent_source_seq));
-                    if let Err(error) = delivery {
+                    if let Err(error) =
+                        transport.send_json(&command_result_envelope(&state, &result))
+                    {
                         disconnected_since.get_or_insert_with(Instant::now);
                         state.record_diagnostic(error.to_string());
                         state.reconnect_count = state.reconnect_count.saturating_add(1);
                         store.save(&state)?;
+                        break;
+                    }
+                    if let Err(error) = send_outbox(&mut transport, &state, &mut sent_source_seq) {
+                        state.record_diagnostic(
+                            "outbox delivery failed; unacknowledged suffix remains durable",
+                        );
+                        store.save(&state)?;
+                        if lifecycle.durable_state().is_some() {
+                            // The controller has accepted this terminal result.
+                            // Stop even though a later outbox frame failed so a
+                            // reconnect cannot restore the runner to ready.
+                            let _ = executor.shutdown();
+                            return Err(error);
+                        }
+                        disconnected_since.get_or_insert_with(Instant::now);
+                        state.reconnect_count = state.reconnect_count.saturating_add(1);
                         break;
                     }
                     if let Some(durable_lifecycle) = lifecycle.durable_state() {
