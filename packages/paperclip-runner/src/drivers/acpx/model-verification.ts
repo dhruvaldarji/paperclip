@@ -28,24 +28,26 @@ export async function requireVerifiedAcpxModel(
     );
   }
   const requestedModel = profile.qualificationModel;
+  const providerModel = profile.reportedModelId;
   let status = await control.getStatus();
-  const mustSelectCanonical =
-    profile.reportedModelId !== requestedModel ||
-    status.models?.currentModelId !== requestedModel;
-  if (mustSelectCanonical) {
+  if (status.models?.currentModelId !== providerModel) {
     if (!control.setModel) {
       throw acpxModelVerificationError(
         "ACPX_MODEL_SELECTION_UNAVAILABLE",
-        "ACPX agent cannot verify its canonical model through ACP config options",
+        "ACPX agent cannot verify its qualified model through ACP config options",
       );
     }
-    await control.setModel(requestedModel);
+    // The caller-facing model is already pinned by resolveQualifiedAcpxProfile.
+    // Select the immutable ACP-facing identifier from that same profile: some
+    // providers expose a stable selector (for example Claude's `sonnet`) while
+    // Paperclip publishes the canonical model name after verification.
+    await control.setModel(providerModel);
     status = await control.getStatus();
   }
-  if (status.models?.currentModelId !== profile.reportedModelId) {
+  if (status.models?.currentModelId !== providerModel) {
     throw acpxModelVerificationError(
       "ACPX_EFFECTIVE_MODEL_MISMATCH",
-      `ACPX effective model mismatch: requested ${requestedModel}, expected ACP selector ${profile.reportedModelId}, received ${status.models?.currentModelId ?? "unverified"}`,
+      `ACPX effective model mismatch: requested ${requestedModel}, expected ACP selector ${providerModel}, received ${status.models?.currentModelId ?? "unverified"}`,
     );
   }
   return normalizeQualifiedModelStatus(status, profile);
