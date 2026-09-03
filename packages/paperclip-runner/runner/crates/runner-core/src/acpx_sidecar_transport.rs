@@ -619,6 +619,15 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "SESSION_CONFIG_OPTION_REPLAY_FAILED" => return "session_config_option_replay_failed",
         "CLAUDE_ACP_SESSION_CREATE_TIMEOUT" => return "claude_session_create_timeout",
         "ACPX_SESSION_HANDSHAKE_TIMEOUT" => return "session_handshake_timeout",
+        "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT" => {
+            return "runtime_admission_verification_timeout"
+        }
+        "ACPX_SIDECAR_STATUS_READ_TIMEOUT" => return "session_status_read_timeout",
+        "ACPX_PERSISTED_SESSION_MISSING" => return "persisted_session_missing",
+        "ACPX_PERSISTED_SESSION_IDENTITY_MISMATCH" => return "persisted_session_identity_mismatch",
+        "ACPX_MODEL_STATUS_UNAVAILABLE" => return "model_status_unavailable",
+        "ACPX_MODEL_SELECTION_UNAVAILABLE" => return "model_selection_unavailable",
+        "ACPX_EFFECTIVE_MODEL_MISMATCH" => return "effective_model_mismatch",
         _ => {}
     }
     match error.message.as_str() {
@@ -714,6 +723,36 @@ mod tests {
             )),
             "session_handshake_timeout"
         );
+        let admission_failures = [
+            (
+                "ACPX_RUNTIME_ADMISSION_VERIFICATION_TIMEOUT",
+                "runtime_admission_verification_timeout",
+            ),
+            (
+                "ACPX_SIDECAR_STATUS_READ_TIMEOUT",
+                "session_status_read_timeout",
+            ),
+            (
+                "ACPX_PERSISTED_SESSION_MISSING",
+                "persisted_session_missing",
+            ),
+            (
+                "ACPX_PERSISTED_SESSION_IDENTITY_MISMATCH",
+                "persisted_session_identity_mismatch",
+            ),
+            ("ACPX_MODEL_STATUS_UNAVAILABLE", "model_status_unavailable"),
+            (
+                "ACPX_MODEL_SELECTION_UNAVAILABLE",
+                "model_selection_unavailable",
+            ),
+            ("ACPX_EFFECTIVE_MODEL_MISMATCH", "effective_model_mismatch"),
+        ];
+        for (code, classification) in admission_failures {
+            assert_eq!(
+                response_error_classification(&error(code, "violet-circuit-4821")),
+                classification,
+            );
+        }
         assert_eq!(
             response_error_classification(&error("ACP_MODEL_UNSUPPORTED", "violet-circuit-4821",)),
             "requested_model_unsupported"
