@@ -104,7 +104,7 @@ fn verified_launch_uses_open_command_and_script_after_atomic_path_replacement() 
     #[cfg(target_os = "linux")]
     assert!(inherited_runtime.starts_with("/proc/self/fd/"));
     #[cfg(target_os = "macos")]
-    assert!(inherited_runtime.contains(".paperclip-verified-launch-"));
+    assert!(inherited_runtime.contains(".paperclip-verified-executable-"));
     assert_eq!(
         process
             .receive_stdout_line(Duration::from_secs(1))
