@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { NativeExecutionInput } from "../contracts/native-execution.js";
+import { FakeCodexTransport } from "../drivers/codex/codex-app-server-driver.test-support.js";
 import { createNativeSessionBackend } from "../index.js";
 import { createCodexNativeSessionBackend } from "./codex-native-backend.js";
 
@@ -122,6 +123,23 @@ function opencodeExecution(): NativeExecutionInput {
       kind: "opencode",
       model: "openrouter/model",
       permissionMode: "allow",
+    },
+  };
+}
+
+function planningExecution(input: NativeExecutionInput): NativeExecutionInput {
+  return {
+    ...input,
+    schema: "paperclip.native-execution-input.v2",
+    task: { ...input.task, workMode: "planning" },
+    executionMode: "plan",
+    planningContext: {
+      documentId: null,
+      baseRevisionId: null,
+      baseRevisionNumber: 0,
+      markdown: "",
+      sha256: "empty-plan",
+      reviewContext: {},
     },
   };
 }
@@ -251,9 +269,52 @@ describe("native backend factory", () => {
         resume: true,
         interruption: true,
         dynamicTools: true,
+        collaborationModes: ["default", "plan"],
       },
     });
   });
+
+  it.each([
+    ["OpenCode", opencodeExecution()],
+    ["ACPX Codex", acpxExecution("codex")],
+    ["ACPX Claude", acpxExecution("claude")],
+  ])(
+    "opens %s planning runs through the runner-managed plan contract",
+    async (_label, input) => {
+      const transport = new FakeCodexTransport();
+      const backend = createNativeSessionBackend(planningExecution(input), {
+        codexTransportFactory: () => transport,
+      });
+
+      await expect(backend.descriptor()).resolves.toMatchObject({
+        capabilities: { collaborationModes: ["default", "plan"] },
+      });
+      const session = await backend.openSession({
+        identity: {
+          runId: "run",
+          sessionId: "session",
+          companyId: "company",
+          issueId: "issue",
+          agentId: "agent",
+        },
+        workingDirectory: process.cwd(),
+      });
+
+      await expect(
+        session.startTurn({
+          message: { role: "user", text: "Author a plan." },
+          requestedCollaborationMode: "plan",
+        }),
+      ).resolves.toMatchObject({ effectiveCollaborationMode: "plan" });
+      expect(
+        transport.calls.find((call) => call.method === "thread/start")?.params,
+      ).toMatchObject({ permissions: "paperclip-runner-workspace-read-only" });
+      expect(
+        transport.calls.find((call) => call.method === "turn/start")?.params,
+      ).toMatchObject({ collaborationMode: { mode: "plan" } });
+      await session.close({ reason: "test complete" });
+    },
+  );
 
   it.each([
     [
@@ -337,6 +398,7 @@ describe("native backend factory", () => {
           resume: true,
           interruption: true,
           dynamicTools: true,
+          collaborationModes: ["default", "plan"],
         },
       });
     },

@@ -92,6 +92,10 @@ function createTransportBackedNativeSessionBackend(
 ): NativeSessionBackend {
   const driverIdentity = transportDriverIdentity(input);
   const isCodex = input.provider.kind === "codex";
+  const supportsCollaborativePlanning =
+    isCodex ||
+    input.provider.kind === "opencode" ||
+    input.provider.kind === "acpx";
   if (
     input.provider.kind === "codex"
     && input.provider.approvalPolicy !== undefined
@@ -113,14 +117,18 @@ function createTransportBackedNativeSessionBackend(
     baseInstructions: nativeSystemInstructions(input),
     includeSkillInstructions: isCodex && "runtimeContext" in input,
     requestedCollaborationMode:
-      isCodex && "executionMode" in input ? input.executionMode : "default",
+      supportsCollaborativePlanning && "executionMode" in input
+        ? input.executionMode
+        : "default",
     taskEnvelope: createCodexTaskEnvelope({
       objective: input.completionContract.contract.objective,
       contractRevision: input.completionContract.contract.revision,
       criteria: input.completionContract.contract.criteria,
       constraints: [
         "Work only inside the supplied working directory.",
-        ...(isCodex && "executionMode" in input && input.executionMode === "plan"
+        ...(supportsCollaborativePlanning &&
+          "executionMode" in input &&
+          input.executionMode === "plan"
           ? [
               "Use native plan collaboration mode and do not modify workspace files.",
               "Treat the supplied Paperclip planning context as the canonical pinned base revision.",
@@ -143,7 +151,9 @@ function createTransportBackedNativeSessionBackend(
     capabilities: isCodex
       ? {}
       : { steering: false, goals: false, threadLineage: false },
-    collaborationModes: isCodex ? ["default", "plan"] : ["default"],
+    collaborationModes: supportsCollaborativePlanning
+      ? ["default", "plan"]
+      : ["default"],
     requireProviderSessionIdentity: options.transportFactory !== undefined,
   }));
 }
