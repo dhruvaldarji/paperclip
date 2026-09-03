@@ -278,9 +278,10 @@ impl AcpxSidecarTransport {
                     let error = response.error.expect("failed response has validated error");
                     return Ok(CommandOutcome::Rejected(LocalRunnerError::invalid(
                         format!(
-                            "ACPX sidecar command {} was rejected (retryable={})",
+                            "ACPX sidecar command {} was rejected (retryable={}, classification={})",
                             command.as_str(),
                             error.retryable,
+                            response_error_classification(&error.message),
                         ),
                     )));
                 }
@@ -596,6 +597,19 @@ fn redact_diagnostic(value: &str) -> String {
     }
 }
 
+fn response_error_classification(message: &str) -> &'static str {
+    match message {
+        "ACPX session handshake exceeded its admission deadline" => "session_handshake_timeout",
+        "ACPX provider lifetime guardian exited before ownership transfer" => {
+            "provider_guardian_exit"
+        }
+        "ACPX provider lifetime guardian ownership timed out" => "provider_guardian_timeout",
+        "ACPX session handshake and runtime cleanup failed" => "session_handshake_cleanup_failed",
+        "ACPX runtime initialization and cleanup failed" => "runtime_initialization_cleanup_failed",
+        _ => "unclassified",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +654,17 @@ mod tests {
             assert!(message.contains(expected), "unexpected error: {message}");
             assert!(!message.contains("Q7Z9"), "error leaked input: {message}");
         }
+    }
+
+    #[test]
+    fn classifies_only_allowlisted_internal_sidecar_failures() {
+        assert_eq!(
+            response_error_classification("ACPX session handshake exceeded its admission deadline"),
+            "session_handshake_timeout"
+        );
+        assert_eq!(
+            response_error_classification("violet-circuit-4821"),
+            "unclassified"
+        );
     }
 }

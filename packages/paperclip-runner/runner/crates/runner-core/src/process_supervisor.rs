@@ -195,11 +195,21 @@ pub enum VerifiedProcessArgument {
 pub struct VerifiedProcessLaunch {
     program: VerifiedProcessArtifact,
     args: Vec<VerifiedProcessArgument>,
+    inherit_runtime_executable: bool,
 }
 
 impl VerifiedProcessLaunch {
     pub fn new(program: VerifiedProcessArtifact, args: Vec<VerifiedProcessArgument>) -> Self {
-        Self { program, args }
+        Self {
+            program,
+            args,
+            inherit_runtime_executable: false,
+        }
+    }
+
+    pub fn with_inherited_runtime_executable(mut self) -> Self {
+        self.inherit_runtime_executable = true;
+        self
     }
 
     #[cfg(test)]
@@ -624,7 +634,9 @@ impl SupervisedProcess {
                 shutdown_grace,
                 max_line_bytes,
                 additional_environment_keys,
-                Some(&inherited.program),
+                launch
+                    .inherit_runtime_executable
+                    .then_some(inherited.program.as_path()),
             );
             #[cfg(target_os = "macos")]
             if let Ok(process) = result.as_mut() {

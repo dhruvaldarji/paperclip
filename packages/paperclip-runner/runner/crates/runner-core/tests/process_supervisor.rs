@@ -68,7 +68,8 @@ fn verified_launch_uses_open_command_and_script_after_atomic_path_replacement() 
             )
             .unwrap(),
         )],
-    );
+    )
+    .with_inherited_runtime_executable();
 
     let replacement_command = directory.join("replacement-command");
     let replacement_script = directory.join("replacement-script");

@@ -1196,6 +1196,132 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     });
   });
 
+  it("keeps the live wizard mounted while a post-create company-list refetch runs", async () => {
+    // The authorization fetch needs to delay the first mount when a draft
+    // exists. Once the customer has typed, though, invalidating that query is
+    // normal background work. Unmounting for the refetch remounted the wizard
+    // from this page-load draft and made a successful create look like a reset.
+    window.localStorage.setItem(
+      ONBOARDING_STORAGE_KEY,
+      JSON.stringify({ step: 1, companyName: "", createdCompanyId: null }),
+    );
+    let resolveRefetch: (companies: Array<{ id: string; name: string; issuePrefix: string }>) => void =
+      () => {};
+    mockCompaniesApi.list
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(
+        () =>
+          new Promise<Array<{ id: string; name: string; issuePrefix: string }>>((resolve) => {
+            resolveRefetch = resolve;
+          }),
+      );
+    mockCompaniesApi.create.mockResolvedValue({
+      id: "created",
+      name: "Created Co",
+      issuePrefix: "CRE",
+    });
+
+    const { root, queryClient } = render();
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OnboardingWizard />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    const companyNameInput = document.querySelector("input") as HTMLInputElement;
+    setControlledValue(companyNameInput, "Created Co");
+    await act(async () => {
+      [...document.body.querySelectorAll("button")]
+        .find((button) => button.textContent?.trim() === "Continue")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(mockCompaniesApi.create).toHaveBeenCalledWith({ name: "Created Co" });
+    expect(mockCompaniesApi.list).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("#onboarding-agent-name")).not.toBeNull();
+
+    await act(async () => {
+      resolveRefetch([{ id: "created", name: "Created Co", issuePrefix: "CRE" }]);
+    });
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("restores a draft after its initial ownership check fails and a retry succeeds", async () => {
+    // A failed first request cannot authorize the draft, so the wizard opens
+    // with safe defaults. The original gate remounted on a later successful
+    // retry so the now-verified draft could be restored; keep that recovery
+    // while preserving the post-create refetch fix above.
+    window.localStorage.setItem(
+      ONBOARDING_STORAGE_KEY,
+      JSON.stringify({
+        step: 3,
+        companyName: "Saved Co",
+        agentName: "Ops Lead",
+        createdCompanyId: "c1",
+      }),
+    );
+    const company = { id: "c1", name: "Saved Co", issuePrefix: "SC" };
+    let resolveRetry: (companies: Array<{ id: string; name: string; issuePrefix: string }>) => void =
+      () => {};
+    mockCompaniesApi.list
+      .mockRejectedValueOnce(new Error("company list unavailable"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Array<{ id: string; name: string; issuePrefix: string }>>((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+
+    const { root, queryClient } = render();
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <OnboardingWizard />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    expect(document.querySelector("#onboarding-agent-name")).toBeNull();
+
+    mockCompany.companies = [company];
+    await act(async () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.companies.list(SESSION_USER_ID),
+      });
+    });
+    await flushReact();
+
+    // The retry is intentionally still in flight. The wrapper removes the
+    // safe-default wizard so a completed validation can mount the saved draft.
+    expect(document.body.textContent).toBe("");
+
+    await act(async () => {
+      resolveRetry([company]);
+    });
+    await flushReact();
+
+    expect(mockCompaniesApi.list).toHaveBeenCalledTimes(2);
+    expect(queryClient.getQueryData(queryKeys.companies.list(SESSION_USER_ID))).toEqual({
+      companies: [company],
+      unauthorized: false,
+    });
+    const agentNameInput = document.querySelector(
+      "#onboarding-agent-name",
+    ) as HTMLInputElement | null;
+    expect(agentNameInput?.value).toBe("Ops Lead");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("discards a saved draft for a company the signed-in account does not own, and wipes the stale blob", async () => {
     // The actual vulnerability this fix closes: localStorage is per-origin,
     // not per-account, so a browser that already onboarded "company-old" for
