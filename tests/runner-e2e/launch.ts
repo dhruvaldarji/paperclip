@@ -2,7 +2,6 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -46,6 +45,7 @@ import {
   reapNewDetachedDarwinSharedMemory,
   snapshotDarwinSharedMemory,
 } from "./shared-memory.js";
+import { reserveRunnerE2EServerPort } from "./ports.js";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const localEnvPath = path.join(repositoryRoot, ".env.runner-e2e.local");
@@ -155,21 +155,6 @@ async function loadLocalEnvironment(target: NodeJS.ProcessEnv) {
     }
     target[match[1]] = value;
   }
-}
-
-async function reservePort() {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string")
-    throw new Error("Failed to reserve a loopback port");
-  await new Promise<void>((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
-  );
-  return address.port;
 }
 
 async function prepareProviderPath(
@@ -388,7 +373,7 @@ async function runAttempt(input: {
       instanceId,
       "config.json",
     );
-    const port = await reservePort();
+    const port = await reserveRunnerE2EServerPort();
     await Promise.all([
       mkdir(paperclipHome, { recursive: true }),
       mkdir(workspace, { recursive: true }),

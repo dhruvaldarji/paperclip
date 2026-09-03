@@ -27,6 +27,11 @@ import {
 } from "./redaction.js";
 import { parseDarwinSharedMemory } from "./shared-memory.js";
 import {
+  reserveRunnerE2EServerPort,
+  runnerE2EServerPortConflictsWithDatabase,
+  type LoopbackPortReservation,
+} from "./ports.js";
+import {
   acceptedPlanSessionResetFailures,
   isControlPlaneGovernedResponseWait,
   isNonExecutingReviewFenceRun,
@@ -76,6 +81,36 @@ describe("runner E2E local binary resolution", () => {
         "linux",
       ),
     ).toBe("/custom/paperclip-runnerd");
+  });
+});
+
+describe("runner E2E server port allocation", () => {
+  it("rejects direct and derived embedded-Postgres collisions", () => {
+    expect(runnerE2EServerPortConflictsWithDatabase(44_329)).toBe(true);
+    expect(runnerE2EServerPortConflictsWithDatabase(54_329)).toBe(true);
+    expect(runnerE2EServerPortConflictsWithDatabase(64_329)).toBe(true);
+    expect(runnerE2EServerPortConflictsWithDatabase(43_123)).toBe(false);
+  });
+
+  it("retries a derived collision while closing every reservation", async () => {
+    const closed: number[] = [];
+    const ports = [44_329, 43_123, 53_123];
+    const openPort = vi.fn(async (requestedPort: number) => {
+      const port = requestedPort === 0 ? ports.shift() : requestedPort;
+      if (port === undefined) throw new Error("Missing fake port");
+      return {
+        port,
+        close: async () => {
+          closed.push(port);
+        },
+      } satisfies LoopbackPortReservation;
+    });
+
+    await expect(reserveRunnerE2EServerPort({ openPort })).resolves.toBe(
+      43_123,
+    );
+    expect(openPort.mock.calls.map(([port]) => port)).toEqual([0, 0, 53_123]);
+    expect(closed).toEqual([44_329, 53_123, 43_123]);
   });
 });
 
