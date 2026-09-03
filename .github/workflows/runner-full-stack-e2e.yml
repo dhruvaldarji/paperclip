@@ -338,6 +338,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      build_artifact_name: ${{ steps.build_artifact_name.outputs.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -403,10 +405,14 @@ jobs:
             "${archive_paths[@]}"
           sha256sum runner-e2e-build-bundle.tar.gz > runner-e2e-build-bundle.tar.gz.sha256
 
+      - name: Name immutable shared campaign outputs
+        id: build_artifact_name
+        run: echo "name=runner-e2e-build-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Upload immutable shared campaign outputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: runner-e2e-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.build_artifact_name.outputs.name }}
           path: |
             runner-e2e-build-bundle.tar.gz
             runner-e2e-build-bundle.tar.gz.sha256
@@ -422,6 +428,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    outputs:
+      provider_pack_artifact_name: ${{ steps.provider_pack_artifact_name.outputs.name }}
     steps:
       - name: No remote provider pack needed
         if: needs.catalog.outputs.needs_remote_provider_pack != 'true'
@@ -448,7 +456,7 @@ jobs:
         if: needs.catalog.outputs.needs_remote_provider_pack == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: runner-e2e-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.build_runner_artifacts.outputs.build_artifact_name }}
           path: runner-e2e-build
 
       - name: Verify and restore shared TypeScript outputs
@@ -492,11 +500,16 @@ jobs:
             packages/paperclip-runner/provider-pack
           sha256sum runner-e2e-provider-pack.tar.gz > runner-e2e-provider-pack.tar.gz.sha256
 
+      - name: Name immutable remote provider pack
+        id: provider_pack_artifact_name
+        if: needs.catalog.outputs.needs_remote_provider_pack == 'true'
+        run: echo "name=runner-e2e-provider-pack-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Upload immutable remote provider pack
         if: needs.catalog.outputs.needs_remote_provider_pack == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: runner-e2e-provider-pack-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.provider_pack_artifact_name.outputs.name }}
           path: |
             runner-e2e-provider-pack.tar.gz
             runner-e2e-provider-pack.tar.gz.sha256
@@ -553,14 +566,14 @@ jobs:
       - name: Download immutable campaign outputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: runner-e2e-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.build_runner_artifacts.outputs.build_artifact_name }}
           path: runner-e2e-build
 
       - name: Download immutable remote provider pack
         if: matrix.environmentId == 'daytona' && (matrix.profileId == 'runner-opencode' || startsWith(matrix.profileId, 'runner-acpx-'))
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: runner-e2e-provider-pack-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.build_remote_provider_pack.outputs.provider_pack_artifact_name }}
           path: runner-e2e-provider-pack
 
       - name: Verify and restore campaign outputs

@@ -182,7 +182,13 @@ describe("public repository paid workflow security", () => {
     expect(buildJob).toContain("runner-e2e-build-bundle.tar.gz.sha256");
     expect(buildJob).toContain("runner-e2e-provider-pack.tar.gz.sha256");
     expect(buildJob).toContain(
-      "runner-e2e-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+      'build_artifact_name: ${{ steps.build_artifact_name.outputs.name }}',
+    );
+    expect(buildJob).toContain(
+      "needs.build_runner_artifacts.outputs.build_artifact_name",
+    );
+    expect(buildJob).toContain(
+      'provider_pack_artifact_name: ${{ steps.provider_pack_artifact_name.outputs.name }}',
     );
     expect(workflow).toContain("needs_runner_typescript=");
     expect(workflow).toContain("needs_native_binaries=");
@@ -193,6 +199,12 @@ describe("public repository paid workflow security", () => {
     );
     expect(testJob).toContain("Download immutable campaign outputs");
     expect(testJob).toContain("Download immutable remote provider pack");
+    expect(testJob).toContain(
+      "needs.build_runner_artifacts.outputs.build_artifact_name",
+    );
+    expect(testJob).toContain(
+      "needs.build_remote_provider_pack.outputs.provider_pack_artifact_name",
+    );
     expect(testJob).toContain("sha256sum --check");
     expect(testJob.indexOf("sha256sum --check")).toBeLessThan(
       testJob.indexOf("tar --extract"),
