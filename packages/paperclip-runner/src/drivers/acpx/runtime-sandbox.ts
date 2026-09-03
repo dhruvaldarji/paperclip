@@ -139,6 +139,14 @@ const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_SUFFIX = ".recovering";
 // later attempt then clears it, instead of leaving every admission for this
 // root to wait out the full gate acquire timeout.
 const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_STALE_MS = 5_000;
+// Infix for the private path a recovery lock holder pins its own lock
+// instance under for as long as it holds the lock. Distinct from
+// `ACPX_SANDBOX_ROOT_GATE_REAP_INFIX`, whose files are always short-lived
+// (created and removed within a single function call): this pin instead
+// lives for a holder's entire recovery pass, so a test or a directory scan
+// that expects only transient reap files to ever appear must not mistake it
+// for one. See `withAcpxRuntimeSandboxRootGateRecoveryLock`.
+const ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_PIN_INFIX = ".holder-";
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -1136,14 +1144,25 @@ async function withAcpxRuntimeSandboxRootGateRecoveryLock(
     );
     return;
   }
-  // The lock's own existence, at this one well-known path, is the whole
-  // exclusivity primitive: nothing here ever inspects its content, only its
-  // presence and its age, so — like the lease files beside it — it carries
-  // no content and is never synced. Losing an un-synced create on a crash
-  // only means the lock looks absent right after a reboot, the same as a
-  // clean release; it never causes a live lock to look absent.
+  // Pin this exact lock instance under a private path this holder alone
+  // controls, for as long as it holds the lock. A plain device-and-inode
+  // check taken now and compared again at release time would not be safe on
+  // its own: if a stale-lock break removes the shared name out from under
+  // this holder in between, the filesystem can reuse the just-freed inode
+  // number for an unrelated replacement lock (observed on this file's own
+  // tmp filesystem, the same hazard the gate's own identity checks already
+  // guard against), so a replacement could carry the very same identity the
+  // removed lock had. This extra link keeps that exact inode allocated for
+  // as long as the pin survives, so its device and inode can never be
+  // confused with a later, unrelated file's — the pin is this holder's own
+  // private name, so no break or release anywhere else in this file ever
+  // touches it, and only this holder's own release removes it.
+  const ownPinPath = `${lockPath}${ACPX_SANDBOX_ROOT_GATE_RECOVERY_LOCK_PIN_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
+  let ownEntry: BigIntStats;
   try {
     await handle.chmod(PRIVATE_FILE_MODE);
+    await link(lockPath, ownPinPath);
+    ownEntry = await lstat(ownPinPath, { bigint: true });
   } finally {
     await handle.close();
   }
@@ -1151,7 +1170,92 @@ async function withAcpxRuntimeSandboxRootGateRecoveryLock(
     await dependencies.afterRecoveryLockAcquired?.();
     await recovery();
   } finally {
-    await unlink(lockPath).catch((error) => {
+    await releaseAcpxRuntimeSandboxRootGateRecoveryLock(
+      lockPath,
+      ownPinPath,
+      ownEntry,
+    );
+  }
+}
+
+// Releases this holder's own recovery lock. This must remove only the exact
+// lock instance this holder acquired, never a replacement a later admission
+// has since acquired at the same path — so a plain, unconditional
+// `unlink(lockPath)` is never safe here. `breakStaleAcpxRuntimeSandboxRootGateRecoveryLock`
+// can judge this holder's own still-live lock stale (its own stale threshold
+// is a heuristic, not a proof of death) and remove it while this holder is
+// still genuinely mid-recovery; a later admission can then win a fresh lock
+// of its own at the now-vacant path before this holder's recovery finishes.
+// From this holder's point of view, by the time it releases, `lockPath` can
+// therefore name either its own lock (the common case) or a different
+// admission's live replacement — an unconditional unlink cannot tell these
+// apart, and would delete that replacement right along with its own,
+// letting a third admission win a fresh lock and run its own recovery
+// concurrently with whichever admission the replacement belongs to.
+//
+// This call instead captures whatever currently names `lockPath` with the
+// same atomic `rename` stale-lock recovery uses, then proceeds only by the
+// identity `ownPinPath` still pins: a match proves this call caught its own
+// lock, safe to delete for good; a mismatch means a different admission's
+// live lock was caught by mistake, so this call restores it immediately
+// with `link`, not `rename`, so a further admission that has since taken
+// the now-momentarily-empty shared path is never clobbered by the restore.
+// Either way, this holder's own pin is no longer needed once the shared
+// path is no longer its concern, so this call always releases it last.
+async function releaseAcpxRuntimeSandboxRootGateRecoveryLock(
+  lockPath: string,
+  ownPinPath: string,
+  ownEntry: BigIntStats,
+): Promise<void> {
+  try {
+    const capturePath = `${lockPath}${ACPX_SANDBOX_ROOT_GATE_REAP_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
+    try {
+      await rename(lockPath, capturePath);
+    } catch (error) {
+      // Nothing at the shared path to release directly.
+      if (errorCode(error) === "ENOENT") return;
+      throw error;
+    }
+    const capturedEntry = await lstat(capturePath, { bigint: true }).catch(
+      (error) => {
+        if (errorCode(error) === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (capturedEntry === null) {
+      // The capture is gone already: `capturePath` is a private path only
+      // this call knows, so nothing else should ever remove it, but this
+      // is defensive against that regardless.
+      return;
+    }
+    if (
+      capturedEntry.dev === ownEntry.dev &&
+      capturedEntry.ino === ownEntry.ino
+    ) {
+      await unlink(capturePath).catch((error) => {
+        if (errorCode(error) !== "ENOENT") throw error;
+      });
+      return;
+    }
+    // The rename caught a lock that is not this holder's own: a different
+    // admission's live lock was at the shared path. Put it straight back,
+    // unless a further admission has since taken the now-momentarily-empty
+    // shared path.
+    try {
+      await link(capturePath, lockPath);
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+      // A further admission grabbed the shared path first: leave the
+      // captured lock under its own private name rather than clobber that
+      // claim. Its real owner's own release finds it later, the same way
+      // this call would have found its own lock above.
+      return;
+    }
+    await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+  } finally {
+    await unlink(ownPinPath).catch((error) => {
       if (errorCode(error) !== "ENOENT") throw error;
     });
   }

@@ -1464,11 +1464,11 @@ describe("ACPX runtime sandbox", () => {
 
     // The second admission's own fresh recovery lock is now live at the
     // shared path, created only after it broke the crashed recoverer's
-    // stale one for real. A real lock carries no content — like the lease
-    // files beside it, only its presence and its age ever matter — so its
-    // identity, not its content, is what proves whether it survives
-    // untouched: an admission that deletes it and creates its own new one
-    // in its place would look identical by content alone.
+    // stale one for real. This check asserts on the lock's identity, not
+    // its content: what follows never deletes and recreates this exact
+    // lock, only moves it aside and links it straight back, so its device
+    // and inode stay stable throughout and prove whether it survives
+    // untouched.
     const freshLockIdentity = await waitForAcpxSandboxGateState(async () => {
       const contents = await readFile(recoveryLockPath, "utf8").catch(
         () => null,
@@ -1515,6 +1515,105 @@ describe("ACPX runtime sandbox", () => {
     expect(firstSandbox.root).toBe(probe.root);
     await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(secondSandbox);
     await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
+  });
+
+  it("never removes a replacement recovery lock after a live recovery's own lock is wrongly broken as stale", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+    const recoveryLockPath = `${gatePath}.recovering`;
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    const deadHolderContents = String(deadHolder.pid);
+    await writeFile(gatePath, deadHolderContents, { flag: "wx" });
+
+    vi.resetModules();
+    const firstProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    let releaseFirstLock: () => void = () => {};
+    const firstLockPaused = new Promise<void>((settle) => {
+      releaseFirstLock = settle;
+    });
+    const firstRecovered = firstProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      { afterRecoveryLockAcquired: () => firstLockPaused },
+    );
+
+    // Wait until the first admission has won a genuinely live recovery
+    // lock, before its own recovery pass ever runs.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(stat(recoveryLockPath)).resolves.toBeDefined();
+    });
+
+    // A second admission finds the same dead gate and the first admission's
+    // lock in its way. Move the clock forward past the recovery lock's own
+    // stale threshold before the second admission judges the lock's age, so
+    // it wrongly treats the first admission's still-live lock as abandoned
+    // by a crashed recoverer — the first admission has done nothing wrong;
+    // the lock is simply old enough by the mocked clock to look that way.
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + 5_500);
+    vi.resetModules();
+    const secondProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    let releaseSecondLock: () => void = () => {};
+    const secondLockPaused = new Promise<void>((settle) => {
+      releaseSecondLock = settle;
+    });
+    // The second admission's first attempt at the lock is guaranteed to hit
+    // the first admission's still-present lock and go through a break
+    // attempt, since the first admission never releases before this signal
+    // fires — so reaching this seam again proves the second admission's own
+    // fresh acquisition, on its next retry, not a first-attempt success.
+    let markSecondLockAcquired: () => void = () => {};
+    const secondLockAcquired = new Promise<void>((settle) => {
+      markSecondLockAcquired = settle;
+    });
+    const secondRecovered = secondProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        afterRecoveryLockAcquired: () => {
+          markSecondLockAcquired();
+          return secondLockPaused;
+        },
+      },
+    );
+
+    // The second admission breaks the first admission's real lock (it looks
+    // stale under the mocked clock) and, on its next retry, wins a fresh
+    // lock of its own at the same path — the replacement the first
+    // admission's own eventual release must not remove.
+    await secondLockAcquired;
+    dateNowSpy.mockRestore();
+
+    // The first admission resumes now, unaware its own lock was already
+    // broken. It must never remove the second admission's live replacement
+    // lock when its own recovery finishes and it releases what it believes
+    // is still its own lock. The second admission is still paused and has
+    // not released its own lock itself, so the lock still being present
+    // right after the first admission's own recovery finishes proves the
+    // first admission's release left it alone.
+    releaseFirstLock();
+    const firstSandbox = await firstRecovered;
+    expect(firstSandbox.root).toBe(probe.root);
+    await expect(stat(recoveryLockPath)).resolves.toBeDefined();
+
+    // The second admission now proceeds with its own recovery pass, using
+    // its still-intact replacement lock, and can claim the same, now-freed
+    // root for itself too.
+    releaseSecondLock();
+    const secondSandbox = await secondRecovered;
+    expect(secondSandbox.root).toBe(probe.root);
+
+    await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
+    await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(secondSandbox);
   });
 });
 
