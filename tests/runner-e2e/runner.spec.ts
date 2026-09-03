@@ -1446,17 +1446,19 @@ for (const execution of executions) {
       }
       if (
         execution.suite.id === "openrouter-model-breadth" &&
-        execution.task.id === "question-resume-complete" &&
+        (execution.task.id === "question-resume-complete" ||
+          execution.task.id === "plan-approve-complete") &&
         exactMessageMatcher?.kind === "message_exact" &&
         selectedRuns.every((candidate) => candidate.status === "succeeded") &&
         issue.status === "done" &&
         finalRunMessage !== exactMessageMatcher.expected &&
         record(finalRun.resultJson).summary === exactMessageMatcher.expected
       ) {
-        // A breadth model can occasionally satisfy the durable terminal
-        // contract while paraphrasing the visible final response. Preserve
-        // the exact persisted-message and DOM assertions, but classify this
-        // narrowly proven provider variance for one fresh-harness retry.
+        // An interactive breadth model can occasionally satisfy the durable
+        // terminal contract while paraphrasing the visible final response.
+        // Preserve the exact persisted-message and DOM assertions, but
+        // classify this narrowly proven provider variance for one
+        // fresh-harness retry.
         failureClassOverride = "provider_variance";
       }
       const observedEnvironmentId =
