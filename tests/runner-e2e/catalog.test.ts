@@ -121,11 +121,19 @@ describe("runner E2E catalog", () => {
     expect(localQuestion?.buildPrompt("nonce")).toContain(
       "refer to it only as “the terminal marker.”",
     );
+    const legacyQuestionExitInstruction =
+      "In a legacy runner, after those two writes succeed, end the current response and heartbeat immediately. Do not wait, sleep, poll, or fetch the interaction; `wake_assignee` will start a new heartbeat after the user answers.";
+    expect(localQuestion?.buildPrompt("nonce")).toContain(
+      legacyQuestionExitInstruction,
+    );
     expect(restartQuestion).toMatchObject({
       flow: "question_resume_completion",
       expectedRunCount: 2,
       restartServerBeforeQuestionAnswer: true,
     });
+    expect(restartQuestion?.buildPrompt("nonce")).toContain(
+      legacyQuestionExitInstruction,
+    );
     expect(plan).toMatchObject({
       flow: "plan_approval_completion",
       expectedRunCount: 2,
