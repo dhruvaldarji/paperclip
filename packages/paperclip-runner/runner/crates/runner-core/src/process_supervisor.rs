@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::local_runner::LocalRunnerError;
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
+const VERIFIED_COMMONJS_ARTIFACT_LOADER: &str = r#"const fs=require("node:fs");const Module=require("node:module");const filename=process.argv[1];const source=fs.readFileSync(filename,"utf8").replace(/^#![^\r\n]*(?:\r?\n|$)/,"");const artifact=new Module(filename);artifact.filename=filename;artifact.paths=[];artifact._compile(source,filename);"#;
 
 #[derive(Clone, Debug)]
 pub struct VerifiedProcessArtifact {
@@ -185,6 +186,7 @@ fn snapshot_error(display_path: &Path, error: impl std::fmt::Display) -> LocalRu
 pub enum VerifiedProcessArgument {
     Literal(String),
     Artifact(VerifiedProcessArtifact),
+    CommonJsArtifact(VerifiedProcessArtifact),
     ExecutableArtifact(VerifiedProcessArtifact),
 }
 
@@ -224,6 +226,13 @@ impl VerifiedProcessLaunch {
                 VerifiedProcessArgument::Artifact(artifact) => {
                     let (fd, path) = inherited_artifact(artifact)?;
                     inherited.push(fd);
+                    args.push(path.to_string_lossy().into_owned());
+                }
+                VerifiedProcessArgument::CommonJsArtifact(artifact) => {
+                    let (fd, path) = inherited_artifact(artifact)?;
+                    inherited.push(fd);
+                    args.push("--eval".to_owned());
+                    args.push(VERIFIED_COMMONJS_ARTIFACT_LOADER.to_owned());
                     args.push(path.to_string_lossy().into_owned());
                 }
                 VerifiedProcessArgument::ExecutableArtifact(artifact) => {
@@ -856,5 +865,51 @@ fn exit_fact(status: ExitStatus) -> ProcessExitFact {
             success: status.success(),
             signal: None,
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn verified_artifact(path: &Path, bytes: &[u8]) -> VerifiedProcessArtifact {
+        fs::write(path, bytes).unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        VerifiedProcessArtifact::snapshot_verified(
+            path.to_owned(),
+            File::open(path).unwrap(),
+            &digest,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn commonjs_artifacts_use_the_bounded_descriptor_loader() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "paperclip-commonjs-launch-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let program = verified_artifact(&directory.join("node"), b"node");
+        let script = verified_artifact(&directory.join("sidecar.cjs"), b"module.exports = {};\n");
+        let launch = VerifiedProcessLaunch::new(
+            program,
+            vec![VerifiedProcessArgument::CommonJsArtifact(script)],
+        );
+
+        let inherited = launch.inherited_command().unwrap();
+
+        assert_eq!(inherited.args[0], "--eval");
+        assert_eq!(inherited.args[1], VERIFIED_COMMONJS_ARTIFACT_LOADER);
+        #[cfg(target_os = "linux")]
+        assert!(inherited.args[2].starts_with("/proc/self/fd/"));
+        #[cfg(target_os = "macos")]
+        assert!(inherited.args[2].starts_with("/dev/fd/"));
+        fs::remove_dir_all(directory).unwrap();
     }
 }
