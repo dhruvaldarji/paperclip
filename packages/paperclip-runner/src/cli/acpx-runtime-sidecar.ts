@@ -283,7 +283,10 @@ async function dispatch(
       startedAt: new Date().toISOString(),
     });
     return {
-      identity: acpxProviderSessionIdentity(openedHost.identity()),
+      identity: acpxProviderSessionIdentity(
+        openedHost.identity(),
+        openedHost.binding(),
+      ),
       sidecarPid: process.pid,
       status: opened.status,
     };
@@ -398,7 +401,10 @@ async function dispatch(
   if (request.command === "session.read") {
     const activeHost = requireHost();
     return {
-      identity: acpxProviderSessionIdentity(activeHost.identity()),
+      identity: acpxProviderSessionIdentity(
+        activeHost.identity(),
+        activeHost.binding(),
+      ),
       status: sanitizeRuntimeStatus(
         await readSidecarHostStatusWithin(activeHost),
       ),
@@ -407,7 +413,10 @@ async function dispatch(
   if (request.command === "session.snapshot") {
     const activeHost = requireHost();
     return {
-      identity: acpxProviderSessionIdentity(activeHost.identity()),
+      identity: acpxProviderSessionIdentity(
+        activeHost.identity(),
+        activeHost.binding(),
+      ),
       status: sanitizeRuntimeStatus(
         await readSidecarHostStatusWithin(activeHost),
       ),
@@ -426,7 +435,10 @@ async function dispatch(
     // still serialized, and retainActiveHostCleanup keeps admission closed
     // until one sequential close proves ownership was released.
     const activeHost = requireHost({ allowCleanupRetry: true });
-    const identity = acpxProviderSessionIdentity(activeHost.identity());
+    const identity = acpxProviderSessionIdentity(
+      activeHost.identity(),
+      activeHost.binding(),
+    );
     await closeSidecarHostForCommand(
       activeHost,
       boundedOptionalText(request.params.reason, "Paperclip suspension", 4_000),

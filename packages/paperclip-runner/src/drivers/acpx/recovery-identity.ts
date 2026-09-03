@@ -14,6 +14,7 @@ export interface AcpxRecoveryBinding {
   workspacePath: string;
   workspaceDigest: string;
   runtimeRoot: string;
+  commandDigest: string;
   profileDigest: string;
   requestedModel: string;
   effectiveModel: string;
@@ -87,6 +88,7 @@ export async function createAcpxRecoveryBinding(input: {
     workspacePath,
     workspaceDigest,
     runtimeRoot,
+    commandDigest: input.profile.commandDigest,
     profileDigest,
     requestedModel: input.requestedModel,
     effectiveModel: input.requestedModel,
@@ -117,19 +119,25 @@ export function createAcpxIdentityRecord(
 /** Project the private persisted record into the PRP sidecar wire identity. */
 export function acpxProviderSessionIdentity(
   record: AcpxIdentityRecord,
+  binding: AcpxRecoveryBinding,
 ): AcpxExpectedSessionIdentity {
-  return {
+  const identity: AcpxExpectedSessionIdentity = {
     kind: "acpx",
     normalizedSessionId: record.normalizedSessionId,
     acpxRecordId: record.acpxRecordId,
     backendSessionId: record.backendSessionId,
     agentSessionId: record.agentSessionId,
-    profileDigest: record.profileDigest,
+    // The PRP provider contract historically names this field
+    // `profileDigest`, but it attests the qualified executable digest. Keep
+    // the broader immutable-profile digest private in the persisted record.
+    profileDigest: binding.commandDigest,
     workspaceDigest: record.workspaceDigest,
     requestedModel: record.requestedModel,
     effectiveModel: record.effectiveModel,
     permissionMode: record.permissionMode,
   };
+  verifyExpectedAcpxIdentity(identity, binding, record);
+  return identity;
 }
 
 /**
@@ -146,7 +154,7 @@ export function verifyExpectedAcpxIdentity(
   validateExpected(expected);
   if (
     expected.normalizedSessionId !== binding.normalizedSessionId ||
-    expected.profileDigest !== binding.profileDigest ||
+    expected.profileDigest !== binding.commandDigest ||
     expected.workspaceDigest !== binding.workspaceDigest ||
     expected.requestedModel !== binding.requestedModel ||
     expected.effectiveModel !== binding.effectiveModel ||
