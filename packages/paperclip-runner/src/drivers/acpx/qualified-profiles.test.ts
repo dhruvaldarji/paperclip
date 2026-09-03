@@ -23,4 +23,11 @@ describe("qualified ACPX profiles", () => {
       resolveQualifiedAcpxProfile("codex", "some-other-model"),
     ).toThrow("requires exact model");
   });
+
+  it("binds Codex ACP to the CLI runtime it launches", () => {
+    expect(QUALIFIED_ACPX_PROFILES.codex).toMatchObject({
+      agentRuntimePackage: "@openai/codex",
+      agentRuntimeVersion: "0.148.0",
+    });
+  });
 });
