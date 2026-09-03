@@ -6,25 +6,23 @@ export const VERIFIED_RUNTIME_EXECUTABLE_ENV =
 /**
  * Recover the runner-authenticated executable inherited by a descriptor-loaded
  * sidecar. Linux children cannot use process.execPath here: Node resolves the
- * sealed image to a deleted memfd alias. Anchor the descriptor at the current
- * owner process before launching a descendant, whose own `/proc/self` would
- * otherwise name the wrong descriptor table.
+ * sealed image to a deleted memfd alias. Once the inherited descriptor has
+ * authenticated the current image, `/proc/self/exe` keeps that exact live
+ * image available to every fork/exec generation without granting a descendant
+ * access to an ancestor's descriptor table.
  */
 export function verifiedRuntimeExecutable(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  currentPid: number = process.pid,
+  _currentPid: number = process.pid,
   fallback: string = process.execPath,
 ): string {
   const configured = environment[VERIFIED_RUNTIME_EXECUTABLE_ENV];
   if (configured === undefined) return fallback;
 
   if (platform === "linux") {
-    const match = /^\/proc\/self\/fd\/([0-9]+)$/.exec(configured);
-    if (match) return `/proc/${currentPid}/fd/${match[1]}`;
-    if (/^\/proc\/[1-9][0-9]*\/fd\/[0-9]+$/.test(configured)) {
-      return configured;
-    }
+    if (/^\/proc\/self\/fd\/[0-9]+$/.test(configured)) return "/proc/self/exe";
+    if (configured === "/proc/self/exe") return configured;
     throw new Error("Verified runtime executable descriptor is invalid");
   }
 
