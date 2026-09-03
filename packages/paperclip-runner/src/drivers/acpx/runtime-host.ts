@@ -651,16 +651,22 @@ export class AcpxRuntimeHost {
       reason,
     );
     if (cleanupError) errors.push(...cleanupError.errors);
-    try {
-      // This admission reached a live host, so the sandbox root stays on
-      // disk for reuse. Release only the delete-authority claim, so a later
-      // admission for the same session can claim it and clean up its own
-      // aborted attempt.
-      await releaseAcpxRuntimeSandboxRootClaim(this.#sandbox);
-    } catch (error) {
-      errors.push(error);
-    }
     if (!cleanupError) {
+      try {
+        // The runtime, tool bridge, credential, and command have all now
+        // closed, so nothing but this admission's own claim still uses the
+        // root. The sandbox root itself stays on disk for reuse; release
+        // only the delete-authority claim, so a later admission for the
+        // same session can claim it and clean up its own aborted attempt.
+        // Skip this release when runtime shutdown failed above: the runtime
+        // may still hold files open under the root, and freeing the claim
+        // here could let a later admission win delete authority and remove
+        // a root that is still in use. A retried close reaches this release
+        // once shutdown succeeds.
+        await releaseAcpxRuntimeSandboxRootClaim(this.#sandbox);
+      } catch (error) {
+        errors.push(error);
+      }
       // Runtime, credential, and command ownership has been relinquished even
       // when the provider never acknowledged turn cancellation. Preserve that
       // cancellation error for this caller, but make later close calls

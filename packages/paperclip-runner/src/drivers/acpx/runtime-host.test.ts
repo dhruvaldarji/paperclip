@@ -841,6 +841,65 @@ describe("ACPX runtime host", () => {
     await contender.close();
   });
 
+  it("retains the sandbox claim when runtime shutdown fails, so a still-live root cannot be reclaimed and removed", async () => {
+    const fixture = await hostFixture();
+    let failClose = true;
+    const runtime = runtimePort({
+      onClose: vi.fn(async () => {
+        if (failClose) throw new Error("runtime close failed");
+      }),
+    });
+    const prepareSandbox: NonNullable<
+      AcpxRuntimeHostDependencies["prepareSandbox"]
+    > = vi.fn((input) => prepareAcpxRuntimeSandbox(input));
+    const dependencies = fixture.dependencies({
+      openRuntime: async () => runtime,
+    });
+    dependencies.prepareSandbox = prepareSandbox;
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-all",
+        environment: {
+          PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}",
+        },
+      },
+      dependencies,
+    );
+    const root = host.runtimeRoot();
+
+    await expect(host.close({ reason: "first close" })).rejects.toThrow(
+      /cleanup failed/,
+    );
+
+    // The runtime failed to shut down, so it may still hold files open under
+    // the root. A later admission for the same session must stay declined:
+    // it must never gain delete authority over a root that is still in use.
+    const [{ binding }] = prepareSandbox.mock.calls[0]!;
+    const later = await waitForAcpxAdmission(() =>
+      prepareAcpxRuntimeSandbox({ binding, agent: "codex" }),
+    );
+    expect(later.root).toBe(root);
+    await removeOwnedAcpxRuntimeSandboxRoot(later);
+    await expect(stat(root)).resolves.toBeDefined();
+
+    failClose = false;
+    await expect(
+      host.close({ reason: "retry close" }),
+    ).resolves.toBeUndefined();
+
+    // Runtime shutdown has now succeeded, so this admission's claim is
+    // released. A later admission can claim the root outright and remove it.
+    const retried = await waitForAcpxAdmission(() =>
+      prepareAcpxRuntimeSandbox({ binding, agent: "codex" }),
+    );
+    expect(retried.root).toBe(root);
+    await removeOwnedAcpxRuntimeSandboxRoot(retried);
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("scrubs credentials only after the exact pending runtime close resolves", async () => {
     const fixture = await hostFixture();
     let resolveRuntimeClose!: () => void;
