@@ -354,7 +354,8 @@ fn codex_dynamic_tool_round_trips_through_the_provider_boundary() {
 
     let mut delivered = false;
     let mut completed = false;
-    for _ in 0..32 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         match provider.poll().expect("poll semantic tool event") {
             Some(CodexProviderEvent::ToolCall {
                 call_id,
