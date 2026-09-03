@@ -282,6 +282,8 @@ struct AcpxDurableState {
     #[serde(default)]
     active_turn_id: Option<String>,
     #[serde(default)]
+    provider_exit_unconfirmed: bool,
+    #[serde(default)]
     semantic_result: Option<Value>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -303,6 +305,7 @@ impl AcpxDurableState {
             tool_set,
             identity: None,
             active_turn_id: None,
+            provider_exit_unconfirmed: false,
             semantic_result: None,
             pending_events: VecDeque::new(),
             next_event_sequence: initial_event_sequence(),
@@ -344,6 +347,8 @@ impl AcpxDurableState {
             })
             || (matches!(self.lifecycle.as_str(), "turn_starting" | "turn_active")
                 != self.active_turn_id.is_some())
+            || (self.provider_exit_unconfirmed
+                && (self.lifecycle != "closed" || self.identity.is_none()))
             || self
                 .semantic_result
                 .as_ref()
@@ -509,6 +514,7 @@ impl AcpxCommandExecutor {
                 .expect("ACPX state remains available during recovery");
             state.lifecycle = "closed".to_owned();
             state.active_turn_id = None;
+            state.provider_exit_unconfirmed = true;
             state.push(NormalizedProviderEvent {
                 event_type: "turn.failed".to_owned(),
                 priority: EventPriority::P0,
@@ -518,7 +524,7 @@ impl AcpxCommandExecutor {
                     "status": "failed",
                     "providerTerminalObserved": false,
                     "code": "acpx_active_turn_recovery_closed",
-                    "providerShutdownFailed": false,
+                    "providerShutdownFailed": true,
                 }),
             })?;
             state.push(NormalizedProviderEvent {
@@ -1154,6 +1160,20 @@ impl CommandExecutor for AcpxCommandExecutor {
         // session first so cleanup cannot succeed merely because this process
         // has no in-memory session yet.
         self.restore()?;
+        let provider_exit_unconfirmed = self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.provider_exit_unconfirmed);
+        if self.session.is_none() && provider_exit_unconfirmed {
+            // The prior provider lifetime owns a kernel-backed quorum until its
+            // guardian and process group have exited. Reopening the exact
+            // persistent session can succeed only after that quorum is free;
+            // the replacement then gives this executor a live handle whose
+            // shutdown provides positive cleanup acknowledgement. Never clear
+            // the durable terminal fence based only on the absence of an
+            // in-memory session in this replacement process.
+            self.session = Some(self.start_session(true)?);
+        }
         if let Some(session) = self.session.as_mut() {
             session
                 .shutdown("runner process shutdown")
@@ -1162,6 +1182,20 @@ impl CommandExecutor for AcpxCommandExecutor {
                 })?;
         }
         self.session = None;
+        if provider_exit_unconfirmed {
+            let state = self
+                .state
+                .as_mut()
+                .expect("ACPX state exists for replacement cleanup");
+            state.provider_exit_unconfirmed = false;
+            if let Err(error) = self.save_state() {
+                self.state
+                    .as_mut()
+                    .expect("ACPX state remains available after save failure")
+                    .provider_exit_unconfirmed = true;
+                return Err(error);
+            }
+        }
         Ok(())
     }
 }
@@ -1596,7 +1630,20 @@ mod tests {
         assert!(!marker.exists());
         let events = recovered.poll_events().unwrap();
         assert_eq!(events[0].event_type, "turn.failed");
+        assert_eq!(events[0].payload["providerShutdownFailed"], true);
         assert_eq!(events[1].event_type, "run.terminal");
+        let cleanup_error = recovered
+            .shutdown()
+            .expect_err("cleanup must not succeed without a verified replacement handle");
+        assert!(cleanup_error
+            .to_string()
+            .contains("failed to start ACPX provider"));
+        let persisted: AcpxDurableState = serde_json::from_slice(
+            &fs::read(recovered.state_path()).expect("read retained ACPX state"),
+        )
+        .expect("parse retained ACPX state");
+        assert!(persisted.provider_exit_unconfirmed);
+        assert!(marker.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }
