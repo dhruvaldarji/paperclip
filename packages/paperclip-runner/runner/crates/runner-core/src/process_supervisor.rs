@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::local_runner::LocalRunnerError;
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 256;
+const VERIFIED_RUNTIME_EXECUTABLE_ENV: &str = "PAPERCLIP_VERIFIED_RUNTIME_EXECUTABLE";
 const VERIFIED_COMMONJS_ARTIFACT_LOADER: &str = r#"const fs=require("node:fs");const Module=require("node:module");const filename=process.argv[1];const source=fs.readFileSync(filename,"utf8").replace(/^#![^\r\n]*(?:\r?\n|$)/,"");const artifact=new Module(filename);artifact.filename=filename;artifact.paths=[];artifact._compile(source,filename);"#;
 
 #[derive(Clone, Debug)]
@@ -604,6 +605,7 @@ impl SupervisedProcess {
             shutdown_grace,
             max_line_bytes,
             additional_environment_keys,
+            None,
         )
     }
 
@@ -622,6 +624,7 @@ impl SupervisedProcess {
                 shutdown_grace,
                 max_line_bytes,
                 additional_environment_keys,
+                Some(&inherited.program),
             );
             #[cfg(target_os = "macos")]
             if let Ok(process) = result.as_mut() {
@@ -651,6 +654,7 @@ impl SupervisedProcess {
         shutdown_grace: Duration,
         max_line_bytes: usize,
         additional_environment_keys: &[&str],
+        verified_runtime_executable: Option<&Path>,
     ) -> Result<Self, LocalRunnerError> {
         let mut command = Command::new(program);
         command
@@ -679,6 +683,13 @@ impl SupervisedProcess {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        if let Some(executable) = verified_runtime_executable {
+            // Node reports a sealed memfd launch as `/memfd:... (deleted)` via
+            // process.execPath. Give descriptor-loaded runtimes the inherited,
+            // authenticated executable path so their governed child launches
+            // can reopen the same immutable image instead of that dead alias.
+            command.env(VERIFIED_RUNTIME_EXECUTABLE_ENV, executable);
         }
         #[cfg(unix)]
         command.process_group(0);
