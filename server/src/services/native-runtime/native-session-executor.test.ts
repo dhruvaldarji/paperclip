@@ -31,6 +31,7 @@ import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 type BackendFactoryOptions = {
   runnerInstanceId?: string;
   acpxRuntimeDirectory?: string;
+  workingDirectoryAuthority?: "local_filesystem" | "remote_runner";
   codexTransportFactory?: () => unknown;
   dynamicToolHandler?: (call: unknown) => Promise<unknown>;
   onSpawn?: (meta: {
@@ -4601,7 +4602,9 @@ describe("runnerd provider runtime wiring", () => {
       expect.objectContaining({
         workspace: expect.objectContaining({ cwd: remoteCwd }),
       }),
-      expect.any(Object),
+      expect.objectContaining({
+        workingDirectoryAuthority: "remote_runner",
+      }),
     );
     expect(state.execute).toHaveBeenCalledWith(
       expect.objectContaining({

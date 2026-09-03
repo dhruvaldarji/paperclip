@@ -6549,6 +6549,9 @@ async function createRunnerdBackendWithinSessionClaim(
   const backend = createNativeSessionBackend(runnerExecution, {
     runnerInstanceId: input.runnerInstanceId,
     environment: effectiveRunnerEnvironment,
+    workingDirectoryAuthority: remoteTarget
+      ? "remote_runner"
+      : "local_filesystem",
     onSpawn: input.onSpawn,
     dynamicTools,
     dynamicToolHandler: (call) => authorityEpoch.execute(call),

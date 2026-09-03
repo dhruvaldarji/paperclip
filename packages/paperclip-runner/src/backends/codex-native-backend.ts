@@ -6,12 +6,15 @@ import type {
 } from "../contracts/native-session-backend.js";
 import type { CodexAppServerTransport } from "../drivers/codex/app-server-transport.js";
 import { CodexAppServerDriver } from "../drivers/codex/codex-app-server-driver.js";
+import type { CodexWorkingDirectoryAuthority } from "../drivers/codex/codex-boundaries.js";
 import { HarnessDriverBackend } from "./harness-driver-backend.js";
 import { nativeSystemInstructions, nativeTaskConstraints } from "./runtime-context.js";
 
 export interface CodexNativeSessionBackendOptions {
   /** Effective provider environment, including the assigned workspace boundary. */
   environment?: NodeJS.ProcessEnv;
+  /** Filesystem that authoritatively admits the workspace path. */
+  workingDirectoryAuthority?: CodexWorkingDirectoryAuthority;
   runnerInstanceId?: string;
   onSpawn?: (meta: {
     pid: number;
@@ -90,6 +93,14 @@ function createTransportBackedNativeSessionBackend(
   input: NativeExecutionInput,
   options: CodexNativeSessionBackendOptions,
 ): NativeSessionBackend {
+  if (
+    options.workingDirectoryAuthority === "remote_runner" &&
+    !options.transportFactory
+  ) {
+    throw new Error(
+      "Remote runner workspace authority requires a runnerd transport",
+    );
+  }
   const driverIdentity = transportDriverIdentity(input);
   const isCodex = input.provider.kind === "codex";
   const supportsCollaborativePlanning =
@@ -147,6 +158,7 @@ function createTransportBackedNativeSessionBackend(
     dynamicTools: options.dynamicTools,
     dynamicToolHandler: options.dynamicToolHandler,
     environment: options.environment,
+    workingDirectoryAuthority: options.workingDirectoryAuthority,
     driverIdentity,
     capabilities: isCodex
       ? {}

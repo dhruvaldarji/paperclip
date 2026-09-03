@@ -277,6 +277,62 @@ describe("native backend factory", () => {
     });
   });
 
+  it("defers remote ACPX workspace admission to the runner filesystem", async () => {
+    const remoteWorkspace = "/home/daytona/paperclip-workspace";
+    const transport = new FakeCodexTransport();
+    const request = transport.request.bind(transport);
+    transport.request = async (method, params) => {
+      const response = await request(method, params);
+      if (method !== "thread/start" && method !== "thread/resume") {
+        return response;
+      }
+      return {
+        ...response,
+        cwd: remoteWorkspace,
+        thread: {
+          ...(response.thread as Record<string, unknown>),
+          cwd: remoteWorkspace,
+        },
+      };
+    };
+    const backend = createNativeSessionBackend(acpxExecution("claude"), {
+      codexTransportFactory: () => transport,
+      workingDirectoryAuthority: "remote_runner",
+      environment: {
+        HOME: remoteWorkspace,
+        CODEX_HOME: `${remoteWorkspace}/.codex`,
+        PAPERCLIP_WORKSPACE_CWD: remoteWorkspace,
+      },
+    });
+
+    const session = await backend.openSession({
+      identity: {
+        runId: "run",
+        sessionId: "session",
+        companyId: "company",
+        issueId: "issue",
+        agentId: "agent",
+      },
+      workingDirectory: remoteWorkspace,
+    });
+
+    expect(
+      transport.calls.find((call) => call.method === "thread/start")?.params,
+    ).toMatchObject({ cwd: remoteWorkspace });
+    await session.close({ reason: "test complete" });
+  });
+
+  it("does not allow remote workspace authority without runnerd", () => {
+    expect(() =>
+      createNativeSessionBackend(execution(), {
+        workingDirectoryAuthority: "remote_runner",
+        environment: {
+          PAPERCLIP_WORKSPACE_CWD: "/home/daytona/paperclip-workspace",
+        },
+      }),
+    ).toThrow("requires a runnerd transport");
+  });
+
   it.each([
     ["OpenCode", opencodeExecution()],
     ["ACPX Codex", acpxExecution("codex")],

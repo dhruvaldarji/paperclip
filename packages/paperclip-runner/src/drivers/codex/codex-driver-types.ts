@@ -9,6 +9,7 @@ import type {
   CodexTaskEnvelope,
 } from "../../contracts/codex.js";
 import type { CodexAppServerTransport } from "./app-server-transport.js";
+import type { CodexWorkingDirectoryAuthority } from "./codex-boundaries.js";
 import type { CodexQuestionResponseContext } from "./codex-question-adapter.js";
 
 export interface CodexAppServerDriverOptions {
@@ -40,6 +41,8 @@ export interface CodexAppServerDriverOptions {
     arguments: unknown;
   }) => Promise<unknown>;
   environment?: NodeJS.ProcessEnv;
+  /** Filesystem that authoritatively admits the workspace path. */
+  workingDirectoryAuthority?: CodexWorkingDirectoryAuthority;
   now?: () => Date;
   runnerInstanceId?: string;
   onDiagnostic?: (message: string) => void;

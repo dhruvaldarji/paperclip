@@ -199,6 +199,7 @@ export class CodexAppServerDriver implements HarnessDriver {
     const workingDirectory = validateWorkingDirectory(
       input.workingDirectory,
       this.#options.environment,
+      this.#options.workingDirectoryAuthority,
     );
     const transport = this.#transport();
     const cancellation = bootstrapCancellation(transport, input.signal);
@@ -326,6 +327,7 @@ export class CodexAppServerDriver implements HarnessDriver {
       const workingDirectory = validateWorkingDirectory(
         text(existingThread.cwd),
         this.#options.environment,
+        this.#options.workingDirectoryAuthority,
       );
       const response = await cancellation.wait(transport.request("thread/resume", {
         threadId: snapshot.driverSessionId,
