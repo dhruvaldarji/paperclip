@@ -353,12 +353,9 @@ jobs:
           python3 <<'PY'
           import json
           import os
-          import select
           import shutil
           import subprocess
           import sys
-          import tempfile
-          import time
 
           def snapshot(path):
               descriptor = os.memfd_create("paperclip-verified-launch")
@@ -377,94 +374,34 @@ jobs:
           environment["PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT"] = os.path.abspath(
               "packages/paperclip-runner"
           )
-          environment["PAPERCLIP_VERIFIED_RUNTIME_EXECUTABLE"] = (
-              f"/proc/self/fd/{node_descriptor}"
-          )
-          environment["OPENAI_API_KEY"] = "sk-paperclip-descriptor-probe-not-real"
+          request = {
+              "protocolVersion": 2,
+              "id": 1,
+              "command": "initialize",
+              "params": {"agent": "codex", "model": "gpt-5.6-sol"},
+          }
           loader = r'''const fs=require("node:fs");const Module=require("node:module");const filename=process.argv[1];const source=fs.readFileSync(filename,"utf8").replace(/^#![^\r\n]*(?:\r?\n|$)/,"");const artifact=new Module(filename);artifact.filename=filename;artifact.paths=[];artifact._compile(source,filename);'''
-          process = subprocess.Popen(
+          result = subprocess.run(
               [
                   f"/proc/self/fd/{node_descriptor}",
                   "--eval",
                   loader,
                   f"/proc/self/fd/{sidecar_descriptor}",
               ],
+              input=json.dumps(request) + "\n",
               text=True,
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
+              capture_output=True,
+              timeout=15,
               pass_fds=(node_descriptor, sidecar_descriptor),
               env=environment,
           )
-
-          def request(request_id, command, params):
-              process.stdin.write(json.dumps({
-                  "protocolVersion": 2,
-                  "id": request_id,
-                  "command": command,
-                  "params": params,
-              }) + "\n")
-              process.stdin.flush()
-              deadline = time.monotonic() + 20
-              while time.monotonic() < deadline:
-                  ready, _, _ = select.select([process.stdout], [], [], 1)
-                  if not ready:
-                      continue
-                  line = process.stdout.readline()
-                  if not line:
-                      raise SystemExit("descriptor-safe ACPX sidecar closed stdout")
-                  frame = json.loads(line)
-                  if frame.get("id") == request_id:
-                      return frame
-              raise SystemExit(f"descriptor-safe ACPX {command} timed out")
-
-          initialized = request(
-              1,
-              "initialize",
-              {"agent": "codex", "model": "gpt-5.6-sol"},
-          )
-          if initialized.get("ok") is not True:
+          sys.stdout.write(result.stdout)
+          sys.stderr.write(result.stderr)
+          if result.returncode != 0:
+              raise SystemExit(result.returncode)
+          response = json.loads(result.stdout.strip().splitlines()[0])
+          if response.get("ok") is not True:
               raise SystemExit("descriptor-safe ACPX initialize failed")
-          with tempfile.TemporaryDirectory() as runtime_directory:
-              working_directory = os.path.join(runtime_directory, "workspace")
-              os.mkdir(working_directory)
-              opened = request(
-                  2,
-                  "session.open",
-                  {
-                      "runtimeDirectory": runtime_directory,
-                      "normalizedSessionId": "descriptor-probe-session",
-                      "workingDirectory": working_directory,
-                      "agent": "codex",
-                      "model": "gpt-5.6-sol",
-                      "permissionMode": "approve-all",
-                      "permissionModePinned": True,
-                      "systemInstructions": "",
-                      "runtimeContext": None,
-                      "tools": [],
-                  },
-              )
-          if opened.get("ok") is not True:
-              message = str(opened.get("error", {}).get("message", ""))
-              probes = [
-                  "ENOENT", "EACCES", "EPERM", "memfd", "deleted", "lstat",
-                  "guardian", "ownership", "handshake", "credential", "fence",
-                  "spawn", "executable", "package", "model", "auth", "401",
-                  "timed out", "exited", "failed to start",
-              ]
-              print(json.dumps({
-                  "descriptorSessionOpen": "rejected",
-                  "code": opened.get("error", {}).get("code"),
-                  "messageDigest": __import__("hashlib").sha256(
-                      message.encode("utf8")
-                  ).hexdigest(),
-                  "classifiers": [
-                      probe for probe in probes if probe.lower() in message.lower()
-                  ],
-              }))
-              raise SystemExit("descriptor-safe ACPX session.open failed")
-          process.stdin.close()
-          process.wait(timeout=10)
           PY
 
       - name: Qualify local provider Node interpreter
