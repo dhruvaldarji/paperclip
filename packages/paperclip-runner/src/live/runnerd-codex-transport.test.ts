@@ -91,6 +91,33 @@ it("replays the durable run attachment outcome and latest provider identity", ()
   });
 });
 
+it("identifies an active provider turn that must stop before suspension", () => {
+  expect(
+    runnerdRecoveryInternals.providerDrainStateFromSnapshot({
+      activeProviderTurnId: "provider-turn-1",
+      pendingEvents: [{ eventType: "item.started" }],
+      queuedEvents: [{ eventType: "item.completed" }],
+    }),
+  ).toEqual({
+    pendingEventCount: 2,
+    activeProviderTurnId: "provider-turn-1",
+    providerSettled: false,
+  });
+
+  expect(
+    runnerdRecoveryInternals.providerDrainStateFromSnapshot({
+      activeProviderTurnId: null,
+      ambiguousTurnStartPending: false,
+      pendingEvents: [],
+      queuedEvents: [],
+    }),
+  ).toEqual({
+    pendingEventCount: 0,
+    activeProviderTurnId: null,
+    providerSettled: true,
+  });
+});
+
 it("keeps ACPX terminal tools under the reserved runner-owned catalog", () => {
   const tools = [
     {

@@ -328,6 +328,30 @@ function recoveredRunAttachment(state: {
   };
 }
 
+function providerDrainStateFromSnapshot(state: Record<string, unknown>): {
+  pendingEventCount: number;
+  activeProviderTurnId: string | null;
+  providerSettled: boolean;
+} {
+  const pending = Array.isArray(state.pendingEvents)
+    ? state.pendingEvents.length
+    : 0;
+  const queued = Array.isArray(state.queuedEvents)
+    ? state.queuedEvents.length
+    : 0;
+  const activeProviderTurnId =
+    typeof state.activeProviderTurnId === "string" &&
+    state.activeProviderTurnId.length > 0
+      ? state.activeProviderTurnId
+      : null;
+  return {
+    pendingEventCount: pending + queued,
+    activeProviderTurnId,
+    providerSettled:
+      activeProviderTurnId === null && state.ambiguousTurnStartPending !== true,
+  };
+}
+
 function bridgedCodexQuestionParams(
   request: Record<string, unknown>,
   method: string,
@@ -1895,6 +1919,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #providerDrainState():
     | {
         pendingEventCount: number;
+        activeProviderTurnId: string | null;
         providerSettled: boolean;
       }
     | "unreadable"
@@ -1911,31 +1936,67 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       this.options.runnerStateDirectory ?? resolve(this.#root, "runner");
     const statePath = resolve(stateDirectory, filename);
     if (!existsSync(statePath)) {
-      return { pendingEventCount: 0, providerSettled: true };
+      return {
+        pendingEventCount: 0,
+        activeProviderTurnId: null,
+        providerSettled: true,
+      };
     }
     try {
       const state = record(JSON.parse(readFileSync(statePath, "utf8")));
-      const pending = Array.isArray(state.pendingEvents)
-        ? state.pendingEvents.length
-        : 0;
-      const queued = Array.isArray(state.queuedEvents)
-        ? state.queuedEvents.length
-        : 0;
-      return {
-        pendingEventCount: pending + queued,
-        providerSettled:
-          !(
-            typeof state.activeProviderTurnId === "string" &&
-            state.activeProviderTurnId.length > 0
-          ) && state.ambiguousTurnStartPending !== true,
-      };
+      return providerDrainStateFromSnapshot(state);
     } catch {
       return "unreadable";
     }
   }
 
-  async #drainSettledProviderEventsBeforeSuspend(): Promise<void> {
+  async #stopActiveProviderTurnBeforeSuspend(): Promise<boolean> {
+    const state = this.#providerDrainState();
+    const core = this.#core;
+    if (
+      state === null ||
+      state === "unreadable" ||
+      state.activeProviderTurnId === null ||
+      core === null
+    ) {
+      return false;
+    }
+    const commandId = `command_close_stop_${randomUUID().replaceAll("-", "")}`;
+    core.queueCommand(
+      "turn.stop",
+      { reason: "transport closing after durable run terminal" },
+      commandId,
+      true,
+    );
     const deadline = Date.now() + 1_000;
+    while (Date.now() < deadline) {
+      this.#pumpEventsSafely();
+      const command = core.store.state.commands.find(
+        (candidate) => candidate.commandId === commandId,
+      );
+      if (command?.status === "completed") {
+        this.#diagnostic(
+          `stopped active provider turn ${state.activeProviderTurnId} before runner suspension`,
+        );
+        return true;
+      }
+      if (command !== undefined && command.status !== "pending") {
+        this.#diagnostic(
+          `provider turn stop ${command.status} before runner suspension`,
+        );
+        return false;
+      }
+      if (this.#handle?.child.exitCode !== null) return false;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+    this.#diagnostic("provider turn stop timed out before runner suspension");
+    return false;
+  }
+
+  async #drainSettledProviderEventsBeforeSuspend(
+    timeoutMs = 1_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     let unreadable = false;
     let wakeSequence = 0;
     let crossedDrainBarrier = false;
@@ -1997,7 +2058,11 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       // its durable provider suffix is ACKed. Drain it before suspension so a
       // fresh run authority never inherits the prior run's pending events.
       if (this.#handle.child.exitCode === null) {
-        await this.#drainSettledProviderEventsBeforeSuspend();
+        const stoppedActiveTurn =
+          await this.#stopActiveProviderTurnBeforeSuspend();
+        await this.#drainSettledProviderEventsBeforeSuspend(
+          stoppedActiveTurn ? 5_000 : 1_000,
+        );
       }
       const runnerAlreadyStopping =
         this.#handle.child.exitCode !== null ||
@@ -3501,5 +3566,6 @@ export const runnerdLaunchProfileInternals = Object.freeze({
 });
 
 export const runnerdRecoveryInternals = Object.freeze({
+  providerDrainStateFromSnapshot,
   recoveredRunAttachment,
 });
