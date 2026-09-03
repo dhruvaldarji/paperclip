@@ -80,7 +80,11 @@ const acpxRuntimeSandboxRootOwners = new Map<
 // root or releases the marker, so a still-live admission in another process
 // is never deleted out from under, and the marker is never freed for reclaim
 // while that admission still holds a lease. Each admission removes only its
-// own lease file, when its own use of the root ends.
+// own lease file, when its own use of the root ends. Reading the lease files
+// and acting on what they show are two separate filesystem calls; a
+// same-root gate (defined further down, beside the lease helpers) makes a
+// claim's own lease registration and a teardown's read-then-act run one at a
+// time, so a new lease can never land in the gap between them.
 
 // Associates each returned sandbox object with the exact owner it was built
 // under, without exposing the ownership identifier on the public sandbox
@@ -94,6 +98,21 @@ const ACPX_SANDBOX_ROOT_MARKER_SUFFIX = ".owner";
 const ACPX_SANDBOX_ROOT_MARKER_MAX_BYTES = 128;
 const ACPX_SANDBOX_ROOT_LEASE_INFIX = ".lease-";
 const ACPX_SANDBOX_ROOT_LEASE_IDENTIFIER_PATTERN = /^[0-9a-f]{32}$/;
+
+// A claim (marker write plus lease registration) and a teardown (marker
+// read, lease count, then root delete or marker release) each read state and
+// then act on it. Reading and acting are two separate filesystem calls, so
+// without more, a claim can land in the gap between a teardown's read and
+// its act: the teardown reads zero other leases, a new admission then
+// registers a lease and starts using the root, and the teardown deletes that
+// root anyway. This gate makes every claim and every teardown, for the same
+// root, run one at a time, so a teardown's read and act always observe the
+// same lease set and no claim can land inside that gap. It guards only this
+// short read-then-act critical section, never the slower directory build
+// that follows a claim.
+const ACPX_SANDBOX_ROOT_GATE_SUFFIX = ".gate";
+const ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS = 20_000;
+const ACPX_SANDBOX_ROOT_GATE_RETRY_DELAY_MS = 15;
 
 export interface AcpxRuntimeSandbox {
   root: string;
@@ -690,6 +709,124 @@ async function countOtherAcpxRuntimeSandboxRootLeases(
   }).length;
 }
 
+function acpxRuntimeSandboxRootGatePath(root: string): string {
+  return join(
+    dirname(root),
+    `${basename(root)}${ACPX_SANDBOX_ROOT_GATE_SUFFIX}`,
+  );
+}
+
+/**
+ * Run `criticalSection` as the sole holder of the gate for `root`, across
+ * every Runner process. The gate is a file created with O_CREAT|O_EXCL, the
+ * same cross-process exclusivity primitive the marker claim uses. Call this
+ * around a claim's marker write plus lease registration, and around a
+ * teardown's lease read plus its resulting delete or marker release, so a
+ * claim and a teardown for the same root can never interleave.
+ */
+async function withAcpxRuntimeSandboxRootGate<T>(
+  root: string,
+  criticalSection: () => Promise<T>,
+): Promise<T> {
+  const gatePath = acpxRuntimeSandboxRootGatePath(root);
+  const deadline = Date.now() + ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS;
+  for (;;) {
+    if (await acquireAcpxRuntimeSandboxRootGate(gatePath)) {
+      try {
+        return await criticalSection();
+      } finally {
+        await unlink(gatePath).catch((error) => {
+          if (errorCode(error) !== "ENOENT") throw error;
+        });
+      }
+    }
+    // The gate is held by another admission. Break it only when that holder
+    // is provably gone (a crashed process), never on a mere timeout, so a
+    // slow-but-live holder is never pre-empted.
+    await breakStaleAcpxRuntimeSandboxRootGate(gatePath);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "ACPX sandbox root ownership gate could not be acquired",
+      );
+    }
+    await delay(ACPX_SANDBOX_ROOT_GATE_RETRY_DELAY_MS);
+  }
+}
+
+async function acquireAcpxRuntimeSandboxRootGate(
+  gatePath: string,
+): Promise<boolean> {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      gatePath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      PRIVATE_FILE_MODE,
+    );
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    await handle.chmod(PRIVATE_FILE_MODE);
+    await handle.writeFile(String(process.pid), "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  return true;
+}
+
+// Removes a gate file left behind by a holder process that no longer exists,
+// so a hard process crash inside the critical section cannot block every
+// later admission for this root forever. Never removes a gate whose holder
+// is still alive, or one this process cannot prove is dead.
+async function breakStaleAcpxRuntimeSandboxRootGate(
+  gatePath: string,
+): Promise<void> {
+  let holderPid: number | null = null;
+  try {
+    const handle = await open(
+      gatePath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      const bytes = await readFile(handle);
+      const parsed = Number.parseInt(bytes.toString("utf8").trim(), 10);
+      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Missing, unreadable, or malformed: nothing provable to break here.
+    return;
+  }
+  if (holderPid !== null && isAcpxSandboxRootGateHolderAlive(holderPid)) {
+    return;
+  }
+  await unlink(gatePath).catch((error) => {
+    if (errorCode(error) !== "ENOENT") throw error;
+  });
+}
+
+function isAcpxSandboxRootGateHolderAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH proves the process is gone. Any other outcome (for example
+    // EPERM) cannot prove that, so treat the holder as still alive.
+    return errorCode(error) !== "ESRCH";
+  }
+}
+
+function delay(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, timeoutMs));
+}
+
 function reportDeclinedAcpxSandboxRootClaim(root: string): void {
   process.emitWarning(
     JSON.stringify({
@@ -719,14 +856,20 @@ async function claimAcpxRuntimeSandboxRoot(
     dev: entry.dev,
     ino: entry.ino,
   };
-  const claimed = await writeAcpxSandboxRootMarkerExclusive(
-    markerPath,
-    identifier,
-  );
-  // Register this admission's own durable lease before returning, whether
-  // or not it won the marker, so its occupancy is visible to any process
-  // that later reads the root's leases — including this one.
-  await registerAcpxRuntimeSandboxRootLease(root, identifier);
+  // The marker write and the lease registration run as one gated step, so a
+  // concurrent teardown's lease count can never land between them and miss
+  // this admission's occupancy.
+  const claimed = await withAcpxRuntimeSandboxRootGate(root, async () => {
+    const won = await writeAcpxSandboxRootMarkerExclusive(
+      markerPath,
+      identifier,
+    );
+    // Register this admission's own durable lease before returning, whether
+    // or not it won the marker, so its occupancy is visible to any process
+    // that later reads the root's leases — including this one.
+    await registerAcpxRuntimeSandboxRootLease(root, identifier);
+    return won;
+  });
   if (!claimed) {
     // Another admission already owns this deterministic root. Continue
     // without delete authority: never overwrite its marker, never touch the
@@ -747,61 +890,79 @@ async function claimAcpxRuntimeSandboxRoot(
  * identifier, a changed identity, or another admission still sharing the
  * root — proved by a durable lease file, so a sharing admission in a
  * different process is seen too — means: delete nothing.
+ *
+ * The lease read, the identity revalidation, and the resulting delete or
+ * retain all run as one gated step, so no claim can register a new lease in
+ * the gap between this admission counting leases and acting on that count.
  */
 async function revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
   root: string,
   owner: AcpxRuntimeSandboxRootOwner,
+  dependencies: AcpxRuntimeSandboxRootTeardownDependencies = {},
 ): Promise<void> {
-  // This admission's own use of the root ends here, whether or not it goes
-  // on to hold delete authority.
-  await releaseAcpxRuntimeSandboxRootLease(root, owner.identifier);
+  await withAcpxRuntimeSandboxRootGate(root, async () => {
+    // This admission's own use of the root ends here, whether or not it goes
+    // on to hold delete authority.
+    await releaseAcpxRuntimeSandboxRootLease(root, owner.identifier);
 
-  const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
-    owner.markerPath,
-  );
-  if (storedIdentifier !== owner.identifier) {
-    // A missing marker or a different identifier means another admission
-    // owns (or once owned) this root, or this admission's own claim was
-    // declined. Either way, delete nothing.
+    const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
+      owner.markerPath,
+    );
+    if (storedIdentifier !== owner.identifier) {
+      // A missing marker or a different identifier means another admission
+      // owns (or once owned) this root, or this admission's own claim was
+      // declined. Either way, delete nothing.
+      if (acpxRuntimeSandboxRootOwners.get(root) === owner) {
+        acpxRuntimeSandboxRootOwners.delete(root);
+      }
+      return;
+    }
+    let entry: BigIntStats;
+    try {
+      entry = await lstat(root, { bigint: true });
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        acpxRuntimeSandboxRootOwners.delete(root);
+        return;
+      }
+      throw error;
+    }
+    if (
+      entry.isSymbolicLink() ||
+      !entry.isDirectory() ||
+      entry.dev !== owner.dev ||
+      entry.ino !== owner.ino
+    ) {
+      throw new Error("ACPX sandbox root identity changed before cleanup");
+    }
+    if (
+      (await countOtherAcpxRuntimeSandboxRootLeases(root, owner.identifier)) >
+      0
+    ) {
+      // Another admission — possibly in a different Runner process — built a
+      // live sandbox on this same root and has not yet released its lease.
+      // Leave the root, the marker, and the registry entry alone: the
+      // failure mode is a retained directory, never a deleted live one.
+      return;
+    }
+    await dependencies.afterLeaseCountDecision?.();
+    await rm(root, { recursive: true });
+    await unlink(owner.markerPath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
     if (acpxRuntimeSandboxRootOwners.get(root) === owner) {
       acpxRuntimeSandboxRootOwners.delete(root);
     }
-    return;
-  }
-  let entry: BigIntStats;
-  try {
-    entry = await lstat(root, { bigint: true });
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") {
-      acpxRuntimeSandboxRootOwners.delete(root);
-      return;
-    }
-    throw error;
-  }
-  if (
-    entry.isSymbolicLink() ||
-    !entry.isDirectory() ||
-    entry.dev !== owner.dev ||
-    entry.ino !== owner.ino
-  ) {
-    throw new Error("ACPX sandbox root identity changed before cleanup");
-  }
-  if (
-    (await countOtherAcpxRuntimeSandboxRootLeases(root, owner.identifier)) > 0
-  ) {
-    // Another admission — possibly in a different Runner process — built a
-    // live sandbox on this same root and has not yet released its lease.
-    // Leave the root, the marker, and the registry entry alone: the failure
-    // mode is a retained directory, never a deleted live one.
-    return;
-  }
-  await rm(root, { recursive: true });
-  await unlink(owner.markerPath).catch((error) => {
-    if (errorCode(error) !== "ENOENT") throw error;
   });
-  if (acpxRuntimeSandboxRootOwners.get(root) === owner) {
-    acpxRuntimeSandboxRootOwners.delete(root);
-  }
+}
+
+export interface AcpxRuntimeSandboxRootTeardownDependencies {
+  /**
+   * Internal test seam. Runs inside the root's ownership gate, once this
+   * admission has decided to act (delete the root, or free the marker) and
+   * before it does so.
+   */
+  afterLeaseCountDecision?: () => Promise<void>;
 }
 
 /**
@@ -812,12 +973,17 @@ async function revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
  */
 export async function removeOwnedAcpxRuntimeSandboxRoot(
   sandbox: AcpxRuntimeSandbox,
+  dependencies: AcpxRuntimeSandboxRootTeardownDependencies = {},
 ): Promise<void> {
   const owner = acpxRuntimeSandboxRootOwnerByResult.get(sandbox);
   if (!owner) {
     throw new Error("ACPX sandbox root ownership capability is unavailable");
   }
-  await revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(owner.root, owner);
+  await revalidateAndRemoveOwnedAcpxRuntimeSandboxRoot(
+    owner.root,
+    owner,
+    dependencies,
+  );
 }
 
 /**
@@ -838,34 +1004,42 @@ export async function removeOwnedAcpxRuntimeSandboxRoot(
  * to admissions that share it; the marker then remains stale until an
  * existing recovery process reclaims it, the same accepted failure mode as
  * a marker left by a hard process crash.
+ *
+ * The lease read, the lease count, and the resulting marker release all run
+ * as one gated step, so no claim can register a new lease in the gap
+ * between this admission counting leases and freeing the marker.
  */
 export async function releaseAcpxRuntimeSandboxRootClaim(
   sandbox: AcpxRuntimeSandbox,
+  dependencies: AcpxRuntimeSandboxRootTeardownDependencies = {},
 ): Promise<void> {
   const owner = acpxRuntimeSandboxRootOwnerByResult.get(sandbox);
   if (!owner) {
     throw new Error("ACPX sandbox root ownership capability is unavailable");
   }
-  // This admission's own use of the root ends here.
-  await releaseAcpxRuntimeSandboxRootLease(owner.root, owner.identifier);
+  await withAcpxRuntimeSandboxRootGate(owner.root, async () => {
+    // This admission's own use of the root ends here.
+    await releaseAcpxRuntimeSandboxRootLease(owner.root, owner.identifier);
 
-  const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
-    owner.markerPath,
-  );
-  if (
-    storedIdentifier === owner.identifier &&
-    (await countOtherAcpxRuntimeSandboxRootLeases(
-      owner.root,
-      owner.identifier,
-    )) === 0
-  ) {
-    await unlink(owner.markerPath).catch((error) => {
-      if (errorCode(error) !== "ENOENT") throw error;
-    });
-  }
-  if (acpxRuntimeSandboxRootOwners.get(owner.root) === owner) {
-    acpxRuntimeSandboxRootOwners.delete(owner.root);
-  }
+    const storedIdentifier = await readAcpxSandboxRootMarkerIdentifier(
+      owner.markerPath,
+    );
+    const freeable =
+      storedIdentifier === owner.identifier &&
+      (await countOtherAcpxRuntimeSandboxRootLeases(
+        owner.root,
+        owner.identifier,
+      )) === 0;
+    if (freeable) {
+      await dependencies.afterLeaseCountDecision?.();
+      await unlink(owner.markerPath).catch((error) => {
+        if (errorCode(error) !== "ENOENT") throw error;
+      });
+    }
+    if (acpxRuntimeSandboxRootOwners.get(owner.root) === owner) {
+      acpxRuntimeSandboxRootOwners.delete(owner.root);
+    }
+  });
 }
 
 async function ensurePrivateDirectory(

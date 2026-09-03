@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -12,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +25,16 @@ import {
   releaseAcpxRuntimeSandboxRootClaim,
   removeOwnedAcpxRuntimeSandboxRoot,
 } from "./runtime-sandbox.js";
+
+const CONCURRENT_CLAIM_HEAD_START_MS = 25;
+
+/** Gives a concurrently kicked-off claim a real chance to run ahead, so a
+ * later "did not settle yet" check is meaningful rather than incidental. */
+function waitForConcurrentClaimHeadStart(): Promise<void> {
+  return new Promise((resolve) =>
+    setTimeout(resolve, CONCURRENT_CLAIM_HEAD_START_MS),
+  );
+}
 
 const temporaryDirectories: string[] = [];
 
@@ -399,6 +410,118 @@ describe("ACPX runtime sandbox", () => {
       "shared-occupant",
     );
     await expect(stat(owner.root)).resolves.toBeDefined();
+  });
+
+  it("never frees a marker for a concurrent claim to slip past a still-deciding release", async () => {
+    const fixture = await sandboxFixture("codex");
+    const first = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    const credentialPath = join(first.agentHomeDirectory, "auth.json");
+    await writeFile(credentialPath, '{"owner":"first"}\n');
+
+    let concurrentProcess: typeof import("./runtime-sandbox.js") | null =
+      null;
+    let concurrentClaim: ReturnType<typeof prepareAcpxRuntimeSandbox> | null =
+      null;
+    let concurrentClaimSettled = false;
+
+    // The owner admission closes normally. Once it has decided the marker
+    // is free to release, race a second, concurrent admission's claim for
+    // the same deterministic root against that decision, simulated as a
+    // second Runner process.
+    await releaseAcpxRuntimeSandboxRootClaim(first, {
+      afterLeaseCountDecision: async () => {
+        vi.resetModules();
+        concurrentProcess = await import("./runtime-sandbox.js");
+        concurrentClaim = concurrentProcess
+          .prepareAcpxRuntimeSandbox({
+            binding: fixture.binding,
+            agent: "codex",
+          })
+          .finally(() => {
+            concurrentClaimSettled = true;
+          });
+        await waitForConcurrentClaimHeadStart();
+        // The concurrent claim's own marker write needs this admission's
+        // ownership gate, which this admission still holds here.
+        expect(concurrentClaimSettled).toBe(false);
+      },
+    });
+
+    const second = await concurrentClaim!;
+    expect(second.root).toBe(first.root);
+    // The concurrent claim only proceeded once the release had fully
+    // finished, so it became this root's sole new owner with a fresh
+    // ownership marker, rather than sharing a marker this admission was
+    // about to free regardless of who else was using the root.
+    await concurrentProcess!.removeOwnedAcpxRuntimeSandboxRoot(second);
+    await expect(stat(first.root)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const siblingEntries = await readdir(dirname(first.root));
+    expect(siblingEntries).not.toContain(`${basename(first.root)}.gate`);
+  });
+
+  it("keeps a concurrent claim's own outcome well-defined when it races an in-flight abort's delete decision", async () => {
+    const fixture = await sandboxFixture("codex");
+    const first = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+
+    let concurrentProcess: typeof import("./runtime-sandbox.js") | null =
+      null;
+    let concurrentClaim: ReturnType<typeof prepareAcpxRuntimeSandbox> | null =
+      null;
+    let concurrentClaimSettled = false;
+
+    // Nobody else is using the root, so this abort will delete it. Once it
+    // has made that decision, race a second, concurrent admission's claim
+    // for the same deterministic root against the delete itself, simulated
+    // as a second Runner process.
+    await removeOwnedAcpxRuntimeSandboxRoot(first, {
+      afterLeaseCountDecision: async () => {
+        vi.resetModules();
+        concurrentProcess = await import("./runtime-sandbox.js");
+        concurrentClaim = concurrentProcess
+          .prepareAcpxRuntimeSandbox({
+            binding: fixture.binding,
+            agent: "codex",
+          })
+          .finally(() => {
+            concurrentClaimSettled = true;
+          });
+        await waitForConcurrentClaimHeadStart();
+        // The concurrent claim's own marker write needs this admission's
+        // ownership gate, which this admission still holds here.
+        expect(concurrentClaimSettled).toBe(false);
+      },
+    });
+
+    // The concurrent claim was deferred until after this admission's delete
+    // fully finished, so it never raced the delete itself; the deleted root
+    // was never live for it to lose. It either lost the root outright and
+    // failed cleanly, or it rebuilt a complete fresh one and succeeded
+    // cleanly — never a half-built directory silently reported as ready.
+    const outcome = await concurrentClaim!.then(
+      (sandbox) => ({ ok: true as const, sandbox }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    if (outcome.ok) {
+      expect(outcome.sandbox.root).toBe(first.root);
+      await expect(
+        stat(outcome.sandbox.stateDirectory),
+      ).resolves.toBeDefined();
+      await concurrentProcess!.removeOwnedAcpxRuntimeSandboxRoot(
+        outcome.sandbox,
+      );
+    } else {
+      expect(outcome.error).toBeInstanceOf(Error);
+    }
+
+    const siblingEntries = await readdir(dirname(first.root));
+    expect(siblingEntries).not.toContain(`${basename(first.root)}.gate`);
   });
 });
 
