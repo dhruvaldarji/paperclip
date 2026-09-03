@@ -7210,7 +7210,6 @@ packages:
 
   opencode-ai@1.18.17:
     resolution: {integrity: sha512-Pc2D3Y6iQ3BAjcKw9E+9J7VTWNazIwFknFfrolufMCrJ0FLxOIZfndoHmJrx4x1oqpK2CPAqK9D2V6nsp6Oebw==}
-    cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
@@ -16024,7 +16023,7 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
       postcss: 8.5.26
-      rollup: 4.62.4
+      rollup: 4.63.1
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 24.13.3
