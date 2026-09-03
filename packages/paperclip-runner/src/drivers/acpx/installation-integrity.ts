@@ -33,21 +33,38 @@ import {
 
 const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_COMMAND_BYTES = 16 * 1024 * 1024;
-const MAX_RUNTIME_EXECUTABLE_BYTES = 256 * 1024 * 1024;
+const MAX_RUNTIME_EXECUTABLE_BYTES = 384 * 1024 * 1024;
 const COMMAND_SOURCE_FD = 3;
 const COMMAND_DIRECTORY_FD = 4;
 const DEPENDENCY_ANCESTOR_FD_START = 5;
 const MAX_DEPENDENCY_ANCESTORS = 64;
 const PROVIDER_WATCHDOG_HANDSHAKE_TIMEOUT_MS = 2_000;
 const PROVIDER_GUARDIAN_HANDSHAKE_TIMEOUT_MS = 5_000;
+const VERIFIED_PROVIDER_RUNTIME_TARGET_ENV =
+  "PAPERCLIP_ACPX_VERIFIED_PROVIDER_RUNTIME_TARGET";
+
+const QUALIFIED_CLAUDE_LINUX_X64_RUNTIME = Object.freeze({
+  runtimePackageName: "@anthropic-ai/claude-agent-sdk",
+  runtimePackageVersion: "0.3.232",
+  packageName: "@anthropic-ai/claude-agent-sdk-linux-x64",
+  packageVersion: "0.3.232",
+  dependencyDeclaration: "0.3.232",
+  relativeExecutable: "claude",
+  executableDigest:
+    "sha256:61d23f8749136907d586d5b11831ea8a5234d4c1dea40a5e55c33b52e204c6d1",
+  environmentVariable: "CLAUDE_CODE_EXECUTABLE",
+});
 
 const QUALIFIED_CODEX_LINUX_X64_RUNTIME = Object.freeze({
+  runtimePackageName: "@openai/codex",
+  runtimePackageVersion: "0.148.0",
   packageName: "@openai/codex-linux-x64",
   packageVersion: "0.148.0-linux-x64",
   dependencyDeclaration: "npm:@openai/codex@0.148.0-linux-x64",
   relativeExecutable: "vendor/x86_64-unknown-linux-musl/bin/codex",
   executableDigest:
     "sha256:ac2cfed85fb647d61e0150b8548102b330e4799d9d81ad5d354de701edf6b074",
+  environmentVariable: "CODEX_PATH",
 });
 
 // Claude's ACP server is not a self-contained bundle: its entrypoint imports
@@ -451,6 +468,7 @@ interface VerifiedAcpxRuntimeExecutable {
   path: string;
   digest: string;
   identity: VerifiedAcpxCommandIdentity;
+  environmentVariable: "CLAUDE_CODE_EXECUTABLE" | "CODEX_PATH";
 }
 
 interface AcpxPackageMetadata {
@@ -536,7 +554,7 @@ export async function verifyQualifiedAcpxInstallation(
       throw new Error("Qualified ACPX runtime package omitted its version");
     }
     runtimePackageJsonPath = await realpath(
-      resolvePackageJson(profile.agentRuntimePackage),
+      resolvePackageJson(profile.agentRuntimePackage, serverPackageJsonPath),
     );
     runtimePackage = await readPackageJson(
       runtimePackageJsonPath,
@@ -774,16 +792,24 @@ async function verifyQualifiedRuntimeExecutable(input: {
   runtimePackageJsonPath: string;
   resolvePackageJson: AcpxPackageJsonResolver;
 }): Promise<VerifiedAcpxRuntimeExecutable | null> {
-  if (input.profile.agent !== "codex") return null;
+  const qualification =
+    input.profile.agent === "claude"
+      ? QUALIFIED_CLAUDE_LINUX_X64_RUNTIME
+      : input.profile.agent === "codex"
+        ? QUALIFIED_CODEX_LINUX_X64_RUNTIME
+        : null;
+  if (qualification === null) return null;
   if (
-    input.profile.agentRuntimePackage !== "@openai/codex" ||
-    input.profile.agentRuntimeVersion !== "0.148.0"
+    input.profile.agentRuntimePackage !== qualification.runtimePackageName ||
+    input.profile.agentRuntimeVersion !== qualification.runtimePackageVersion
   ) {
-    throw new Error("ACPX codex runtime does not match its qualified profile");
+    throw new Error(
+      `ACPX ${input.profile.agent} runtime does not match its qualified profile`,
+    );
   }
   if (process.platform !== "linux" || process.arch !== "x64") {
     throw new Error(
-      "ACPX codex verified runtime executable requires qualified Linux x64",
+      `ACPX ${input.profile.agent} verified runtime executable requires qualified Linux x64`,
     );
   }
 
@@ -793,41 +819,45 @@ async function verifyQualifiedRuntimeExecutable(input: {
     optionalDependencies === null ||
     Array.isArray(optionalDependencies) ||
     (optionalDependencies as Record<string, unknown>)[
-      QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageName
-    ] !== QUALIFIED_CODEX_LINUX_X64_RUNTIME.dependencyDeclaration
+      qualification.packageName
+    ] !== qualification.dependencyDeclaration
   ) {
     throw new Error(
-      "ACPX codex runtime omitted its qualified Linux executable package",
+      `ACPX ${input.profile.agent} runtime omitted its qualified Linux executable package`,
     );
   }
 
   const executablePackageJsonPath = await realpath(
-    input.resolvePackageJson(QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageName),
+    input.resolvePackageJson(
+      qualification.packageName,
+      input.runtimePackageJsonPath,
+    ),
   );
   const executablePackage = await readPackageJson(
     executablePackageJsonPath,
-    QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageName,
+    qualification.packageName,
   );
-  if (
-    executablePackage.version !==
-    QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageVersion
-  ) {
+  if (executablePackage.version !== qualification.packageVersion) {
     throw new Error(
-      `ACPX codex runtime executable package version mismatch: expected ${QUALIFIED_CODEX_LINUX_X64_RUNTIME.packageVersion}, received ${executablePackage.version ?? "unknown"}`,
+      `ACPX ${input.profile.agent} runtime executable package version mismatch: expected ${qualification.packageVersion}, received ${executablePackage.version ?? "unknown"}`,
     );
   }
 
   const packageDirectory = dirname(executablePackageJsonPath);
   const unresolvedExecutablePath = resolve(
     packageDirectory,
-    QUALIFIED_CODEX_LINUX_X64_RUNTIME.relativeExecutable,
+    qualification.relativeExecutable,
   );
   if (!isInside(packageDirectory, unresolvedExecutablePath)) {
-    throw new Error("ACPX codex runtime executable escapes its package");
+    throw new Error(
+      `ACPX ${input.profile.agent} runtime executable escapes its package`,
+    );
   }
   const executableDirectory = await realpath(dirname(unresolvedExecutablePath));
   if (!isInsideOrEqual(packageDirectory, executableDirectory)) {
-    throw new Error("ACPX codex runtime executable escapes its package");
+    throw new Error(
+      `ACPX ${input.profile.agent} runtime executable escapes its package`,
+    );
   }
   const executablePath = resolve(
     executableDirectory,
@@ -835,14 +865,15 @@ async function verifyQualifiedRuntimeExecutable(input: {
   );
   const verified = await openVerifiedRuntimeExecutable(
     executablePath,
-    QUALIFIED_CODEX_LINUX_X64_RUNTIME.executableDigest,
+    qualification.executableDigest,
     input.profile.agent,
   );
   await verified.handle.close();
   return {
     path: executablePath,
-    digest: QUALIFIED_CODEX_LINUX_X64_RUNTIME.executableDigest,
+    digest: qualification.executableDigest,
     identity: verified.identity,
+    environmentVariable: qualification.environmentVariable,
   };
 }
 
@@ -1273,6 +1304,12 @@ function commandLease(
         const runtimeExecutable = verifiedRuntimeExecutable();
         const environment = sanitizedNodeEnvironment(options.env);
         environment[VERIFIED_RUNTIME_EXECUTABLE_ENV] = runtimeExecutable;
+        if (providerRuntimeExecutable === null) {
+          delete environment[VERIFIED_PROVIDER_RUNTIME_TARGET_ENV];
+        } else {
+          environment[VERIFIED_PROVIDER_RUNTIME_TARGET_ENV] =
+            providerRuntimeExecutable.environmentVariable;
+        }
         child = spawnChildProcess(
           runtimeExecutable,
           guarded
@@ -1560,13 +1597,15 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
     "const serverPackageFormat = process.argv[5];",
     "const dependencyAncestorFormats = JSON.parse(process.argv[6]);",
     "const providerRuntimeExecutableCount = Number.parseInt(process.argv[7], 10);",
+    `const providerRuntimeEnvironmentVariable = process.env.${VERIFIED_PROVIDER_RUNTIME_TARGET_ENV};`,
+    `delete process.env.${VERIFIED_PROVIDER_RUNTIME_TARGET_ENV};`,
     'if (process.platform !== "linux") throw new Error("ACPX provider relative module loading requires Linux descriptor-pinned paths");',
     `if (!Number.isSafeInteger(dependencyAncestorCount) || dependencyAncestorCount < 0 || dependencyAncestorCount > ${MAX_DEPENDENCY_ANCESTORS}) throw new Error("ACPX provider dependency ancestry is invalid");`,
     'if (!Number.isSafeInteger(serverDependencyAncestorCount) || serverDependencyAncestorCount < 0 || serverDependencyAncestorCount > dependencyAncestorCount) throw new Error("ACPX provider package ancestry is invalid");',
     'if ((serverPackageFormat !== "module" && serverPackageFormat !== "commonjs") || !Array.isArray(dependencyAncestorFormats) || dependencyAncestorFormats.length !== dependencyAncestorCount || dependencyAncestorFormats.some((value) => value !== "module" && value !== "commonjs")) throw new Error("ACPX provider package formats are invalid");',
     'if (providerRuntimeExecutableCount !== 0 && providerRuntimeExecutableCount !== 1) throw new Error("ACPX provider runtime executable count is invalid");',
     `const providerRuntimeExecutableFd = ${DEPENDENCY_ANCESTOR_FD_START} + dependencyAncestorCount;`,
-    'if (providerRuntimeExecutableCount === 1) { fs.fstatSync(providerRuntimeExecutableFd); process.env.CODEX_PATH = "/proc/" + process.pid + "/fd/" + providerRuntimeExecutableFd; }',
+    'if (providerRuntimeExecutableCount === 1) { if (providerRuntimeEnvironmentVariable !== "CODEX_PATH" && providerRuntimeEnvironmentVariable !== "CLAUDE_CODE_EXECUTABLE") throw new Error("ACPX provider runtime environment target is invalid"); fs.fstatSync(providerRuntimeExecutableFd); process.env[providerRuntimeEnvironmentVariable] = "/proc/" + process.pid + "/fd/" + providerRuntimeExecutableFd; } else if (providerRuntimeEnvironmentVariable !== undefined) throw new Error("ACPX provider runtime environment target is unexpected");',
     ...(guarded
       ? [
           `const guardianFd = ${DEPENDENCY_ANCESTOR_FD_START} + dependencyAncestorCount + providerRuntimeExecutableCount;`,
