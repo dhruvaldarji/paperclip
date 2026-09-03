@@ -427,7 +427,8 @@ impl AcpxDurableState {
             || (matches!(self.lifecycle.as_str(), "turn_starting" | "turn_active")
                 != self.active_turn_id.is_some())
             || (self.provider_exit_unconfirmed
-                && (self.lifecycle != "closed" || self.identity.is_none()))
+                && (!matches!(self.lifecycle.as_str(), "prepared" | "closed")
+                    || self.identity.is_none()))
             || self
                 .semantic_result
                 .as_ref()
@@ -767,6 +768,7 @@ impl AcpxCommandExecutor {
             .iter()
             .all(|event| event.event_type == "session.resumed");
         if state.lifecycle == "closed"
+            || state.provider_exit_unconfirmed
             || state.identity.is_none()
             || state.active_turn_id.is_some()
             || !only_recovery_notice_pending
@@ -799,6 +801,15 @@ impl AcpxCommandExecutor {
     }
 
     fn open_session(&mut self) -> Result<CommandExecution, DurableRunnerError> {
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.provider_exit_unconfirmed)
+        {
+            return Err(DurableRunnerError::invalid(
+                "ACPX provider lifetime cleanup is not yet proven",
+            ));
+        }
         if self.session.is_none() {
             let recovering = self
                 .state
@@ -1002,20 +1013,32 @@ impl AcpxCommandExecutor {
         // descendants, but an escaped provider or guardian can outlive that
         // group. Require the inherited listener quorum before making this
         // durable session attachable, and retain it through the state write.
-        let _provider_lifetime_fence =
-            await_provider_lifetime_fence(provider_lifetime_fence_candidates)?;
         self.session = None;
         let state = self
             .state
             .as_mut()
             .expect("ACPX state remains available after provider termination");
         state.active_turn_id = None;
-        // Keep the provider checkpoint closed while runnerd drains the
-        // already-persisted event suffix. `suspended` is a recoverable ACPX
-        // lifecycle and would make the following runner.drain command restart
-        // the provider generation that turn.stop just proved terminated.
+        // Persist a non-attachable, recoverable boundary before the fallible
+        // lifetime proof. Terminal cleanup can then retry a timed-out fence
+        // without reviving the stopped provider.
         state.lifecycle = "prepared".to_owned();
+        state.provider_exit_unconfirmed = true;
         self.save_state()?;
+        let _provider_lifetime_fence =
+            await_provider_lifetime_fence(provider_lifetime_fence_candidates)?;
+        let state = self
+            .state
+            .as_mut()
+            .expect("ACPX state remains available after provider termination");
+        state.provider_exit_unconfirmed = false;
+        if let Err(error) = self.save_state() {
+            self.state
+                .as_mut()
+                .expect("ACPX state remains available after save failure")
+                .provider_exit_unconfirmed = true;
+            return Err(error);
+        }
         Ok(CommandExecution::result(json!({
             "status": "stopped",
             "providerTurnId": turn_id,
@@ -1930,6 +1953,64 @@ mod tests {
             .expect("suspension must wait until the original lifetime loses quorum");
         assert_eq!(confirmed.len(), 2);
         releaser.join().unwrap();
+    }
+
+    #[test]
+    fn unconfirmed_suspension_state_is_recoverable_but_not_attachable() {
+        let directory = temporary_directory("suspension-fence-pending");
+        let (provider_lifetime_fence_candidates, original_lifetime_fence) =
+            reserve_provider_lifetime_fence();
+        let provider_descriptor: AcpxProviderDescriptor =
+            serde_json::from_value(descriptor("codex")).unwrap();
+        let operations = Vec::new();
+        let tool_set = AuthorizedToolSet {
+            schema: TOOL_SET_SCHEMA.to_owned(),
+            schema_version: 1,
+            catalog_digest: authorized_tool_catalog_digest(&operations).unwrap(),
+            operations,
+        };
+        let launch_profile_digest = format!("sha256:{}", "d".repeat(64));
+        let mut state = AcpxDurableState::new(
+            provider_descriptor.clone(),
+            tool_set,
+            launch_profile_digest.clone(),
+        );
+        state.lifecycle = "prepared".to_owned();
+        state.identity = Some(AcpxProviderSessionIdentity {
+            kind: "acpx".to_owned(),
+            normalized_session_id: "session-1".to_owned(),
+            acpx_record_id: "record-1".to_owned(),
+            backend_session_id: "backend-1".to_owned(),
+            agent_session_id: "agent-1".to_owned(),
+            profile_digest: provider_descriptor.command_digest.clone(),
+            workspace_digest: format!("sha256:{}", "a".repeat(64)),
+            requested_model: provider_descriptor.model.clone(),
+            effective_model: provider_descriptor.model.clone(),
+            permission_mode: Some(provider_descriptor.permission_mode),
+            provider_lifetime_fence_candidates,
+        });
+        state.provider_exit_unconfirmed = true;
+        state.validate(&context(), &launch_profile_digest).unwrap();
+
+        let config = test_config(&directory, None);
+        let mut executor = AcpxCommandExecutor::with_runner_config(&directory, &config);
+        executor.state = Some(state);
+        let open_error = executor.open_session().unwrap_err();
+        assert!(open_error
+            .to_string()
+            .contains("provider lifetime cleanup is not yet proven"));
+        let attach_error = executor
+            .attach_run(&json!({"provider": descriptor("codex")}))
+            .unwrap_err();
+        assert!(attach_error
+            .to_string()
+            .contains("requires the same settled ACPX provider profile and session"));
+        drop(original_lifetime_fence);
+        executor.shutdown().unwrap();
+        let recovered = executor.state.as_ref().unwrap();
+        assert_eq!(recovered.lifecycle, "prepared");
+        assert!(!recovered.provider_exit_unconfirmed);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn reserve_provider_lifetime_fence() -> ([u16; 3], Vec<TcpListener>) {
