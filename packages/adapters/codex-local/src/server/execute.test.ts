@@ -62,8 +62,8 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   };
 });
 
-vi.mock("@paperclipai/adapter-utils", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@paperclipai/adapter-utils")>();
+vi.mock("@paperclipai/adapter-utils/managed-credential-home", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/adapter-utils/managed-credential-home")>();
   // Default implementation is the real guard; a test overrides it once with
   // `assertManagedCredentialHome.mockRejectedValueOnce(...)`.
   assertManagedCredentialHome.mockImplementation(actual.assertManagedCredentialHome);

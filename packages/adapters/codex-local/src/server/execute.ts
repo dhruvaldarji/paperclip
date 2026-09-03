@@ -2,12 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertManagedCredentialHome,
   inferOpenAiCompatibleBiller,
-  ManagedCredentialHomeRejectedError,
   type AdapterExecutionContext,
   type AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
+import {
+  assertManagedCredentialHome,
+  ManagedCredentialHomeRejectedError,
+} from "@paperclipai/adapter-utils/managed-credential-home";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {

@@ -13,11 +13,11 @@ import {
   parseLocalProcessFilesystemScope,
   parseLocalProcessNetworkScope,
 } from "@paperclipai/adapter-utils/local-process-sandbox";
+import { inferOpenAiCompatibleBiller } from "@paperclipai/adapter-utils";
 import {
   assertManagedCredentialHome,
-  inferOpenAiCompatibleBiller,
   ManagedCredentialHomeRejectedError,
-} from "@paperclipai/adapter-utils";
+} from "@paperclipai/adapter-utils/managed-credential-home";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
   readAdapterExecutionTarget,

@@ -7,7 +7,7 @@ import {
   assertNoSymlinkInManagedCredentialPath,
   ManagedCredentialHomeRejectedError,
   resolveManagedCredentialHomeBoundary,
-} from "@paperclipai/adapter-utils";
+} from "@paperclipai/adapter-utils/managed-credential-home";
 import { withDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import {
   isCodexAuthCacheEnabled,
