@@ -1043,8 +1043,9 @@ async function persistedRuntimeStatus(
   const recordId = handle.acpxRecordId ?? handle.sessionKey;
   const record = await sessionStore.load(recordId);
   if (!record) {
-    throw new Error(
-      "The pinned ACPX runtime omitted its persisted session record",
+    throw Object.assign(
+      new Error("The pinned ACPX runtime omitted its persisted session record"),
+      { code: "ACPX_PERSISTED_SESSION_MISSING" },
     );
   }
   if (
@@ -1052,8 +1053,9 @@ async function persistedRuntimeStatus(
     record.acpSessionId !== identity.backendSessionId ||
     record.agentSessionId !== identity.agentSessionId
   ) {
-    throw new Error(
-      "The persisted ACPX session identity changed after admission",
+    throw Object.assign(
+      new Error("The persisted ACPX session identity changed after admission"),
+      { code: "ACPX_PERSISTED_SESSION_IDENTITY_MISMATCH" },
     );
   }
   const currentModelId = record.acpx?.current_model_id;
