@@ -2129,7 +2129,7 @@ it("persists an active provider as settled before bounded suspension", async () 
       ),
     ) as Record<string, unknown>;
     expect(providerState).toMatchObject({
-      lifecycle: "provider_exited",
+      lifecycle: "prepared",
       activeProviderTurnId: null,
     });
   } finally {

@@ -2183,7 +2183,10 @@ impl CodexCommandExecutor {
         state.active_provider_result_fingerprint = None;
         state.active_provider_result_disposition = None;
         state.last_agent_message = None;
-        state.lifecycle = "provider_exited".to_owned();
+        // Do not let the runner.drain command that follows turn.stop restore a
+        // fresh provider process. `prepared` retains the durable thread while
+        // deferring the only authorized restart to the successor run.attach.
+        state.lifecycle = "prepared".to_owned();
         self.save_state()?;
         Ok(CommandExecution::result(json!({
             "status": "stopped",

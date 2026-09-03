@@ -971,7 +971,11 @@ impl AcpxCommandExecutor {
             .as_mut()
             .expect("ACPX state remains available after provider termination");
         state.active_turn_id = None;
-        state.lifecycle = "suspended".to_owned();
+        // Keep the provider checkpoint closed while runnerd drains the
+        // already-persisted event suffix. `suspended` is a recoverable ACPX
+        // lifecycle and would make the following runner.drain command restart
+        // the provider generation that turn.stop just proved terminated.
+        state.lifecycle = "prepared".to_owned();
         self.save_state()?;
         Ok(CommandExecution::result(json!({
             "status": "stopped",
