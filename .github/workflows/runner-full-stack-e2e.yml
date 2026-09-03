@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: runner-full-stack-e2e-${{ github.ref }}
+  group: runner-full-stack-e2e-validation-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
