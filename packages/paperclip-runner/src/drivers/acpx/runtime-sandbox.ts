@@ -376,6 +376,24 @@ export async function prepareAcpxRuntimeSandbox(input: {
       })}\n`,
     );
   }
+  if (input.agent === "codex") {
+    await writePrivateFile(
+      join(agentHomeDirectory, "config.toml"),
+      [
+        // Codex shell snapshots serialize the provider process environment.
+        // The ACPX sidecar receives a short-lived managed credential only so
+        // it can authenticate the provider; that value must never become
+        // durable runtime state or enter a model-invoked shell.
+        "[features]",
+        "shell_snapshot = false",
+        "",
+        "[shell_environment_policy]",
+        'exclude = ["OPENAI_API_KEY", "CODEX_API_KEY"]',
+        "ignore_default_excludes = false",
+        "",
+      ].join("\n"),
+    );
+  }
 
   const sanitizedSpawnInput = createSanitizedAcpxSpawnInput(
     input.environment,
