@@ -119,11 +119,11 @@ test("old and new pnpm configuration both apply the exact runtime patches", () =
   assert.match(workspace, /acpx@0\.13\.1: patches\/acpx@0\.13\.1\.patch/);
   assert.match(
     workspace,
-    /codex-acp@1\.6\.2': patches\/@agentclientprotocol__codex-acp@1\.6\.2\.patch/,
+    /codex-acp@1\.6\.2["']: patches\/@agentclientprotocol__codex-acp@1\.6\.2\.patch/,
   );
   assert.match(
     workspace,
-    /claude-agent-acp@0\.70\.0': patches\/@agentclientprotocol__claude-agent-acp@0\.70\.0\.patch/,
+    /claude-agent-acp@0\.70\.0["']: patches\/@agentclientprotocol__claude-agent-acp@0\.70\.0\.patch/,
   );
   assert.equal(rootPackage.pnpm.patchedDependencies["node@24.11.0"], undefined);
   assert.doesNotMatch(workspace, /node@24\.11\.0:/);
