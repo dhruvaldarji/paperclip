@@ -28,6 +28,9 @@ patchedDependencies:
   embedded-postgres@18.1.0-beta.16:
     hash: 55uhvnotpqyiy37rn3pqpukhei
     path: patches/embedded-postgres@18.1.0-beta.16.patch
+  node@24.11.0:
+    hash: v5qkq5xhqy2tsyfb3ac3vqpw7e
+    path: patches/node@24.11.0.patch
 
 importers:
 
@@ -494,7 +497,7 @@ importers:
         version: 3.1.1
       node:
         specifier: 24.11.0
-        version: 24.11.0
+        version: 24.11.0(patch_hash=v5qkq5xhqy2tsyfb3ac3vqpw7e)
       opencode-ai:
         specifier: 1.18.17
         version: 1.18.17
@@ -14711,7 +14714,7 @@ snapshots:
 
   node-releases@2.0.53: {}
 
-  node@24.11.0:
+  node@24.11.0(patch_hash=v5qkq5xhqy2tsyfb3ac3vqpw7e):
     dependencies:
       node-bin-setup: 1.1.4
 
