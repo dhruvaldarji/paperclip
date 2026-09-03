@@ -865,13 +865,25 @@ fn reserved_terminal_tool_set() -> Result<AuthorizedToolSet, LocalRunnerError> {
     })
 }
 
-fn sidecar_run_tool_operations(run_tool_set: &AuthorizedToolSet) -> Vec<AuthorizedTool> {
+fn sidecar_run_tool_operations(run_tool_set: &AuthorizedToolSet) -> Vec<Value> {
     // The authenticated TypeScript bridge installs the trusted terminal tools
     // itself and rejects caller attempts to replace either reserved schema.
-    // Send only the attached run catalog across this boundary; Rust keeps its
-    // independent reserved receipt ledger and validates terminal values after
-    // the sidecar reports them.
-    run_tool_set.operations.clone()
+    // Project the durable Rust catalog into the bridge's public tool shape;
+    // forwarding AuthorizedTool verbatim would expose `operationId` where the
+    // bridge requires `name` and reject every non-empty catalog at admission.
+    // Rust keeps its independent reserved receipt ledger and validates terminal
+    // values after the sidecar reports them.
+    run_tool_set
+        .operations
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.operation_id,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+            })
+        })
+        .collect()
 }
 
 fn validate_prp_run_result(value: &Value) -> Result<(), LocalRunnerError> {
@@ -1157,11 +1169,19 @@ mod tests {
         assert_eq!(
             sidecar_tools
                 .iter()
-                .map(|tool| tool.operation_id.as_str())
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
                 .collect::<Vec<_>>(),
             vec!["get_task_context"]
         );
         assert_eq!(run_tool_set.operations.len(), 1);
-        assert!(sidecar_tools[0].input_schema.is_object());
+        assert_eq!(
+            sidecar_tools[0],
+            json!({
+                "name": "get_task_context",
+                "description": "Read the task context.",
+                "inputSchema": {"type":"object"},
+            })
+        );
+        assert!(sidecar_tools[0].get("operationId").is_none());
     }
 }
