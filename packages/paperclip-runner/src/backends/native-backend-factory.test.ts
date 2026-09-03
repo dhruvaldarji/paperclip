@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+
 import { describe, expect, it } from "vitest";
 
 import type { NativeExecutionInput } from "../contracts/native-execution.js";
@@ -297,7 +299,7 @@ describe("native backend factory", () => {
           issueId: "issue",
           agentId: "agent",
         },
-        workingDirectory: process.cwd(),
+        workingDirectory: tmpdir(),
       });
 
       await expect(
