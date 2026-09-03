@@ -1547,7 +1547,7 @@ function snapshotBootstrap(format: AcpxCommandFormat, guarded = false): string {
     "});",
     "} });",
     'diagnose("import_started");',
-    'import(target).then(() => diagnose("import_resolved"), (error) => { diagnose("import_rejected"); console.error(error); process.exitCode = 1; });',
+    'import(target).then(() => diagnose("import_resolved"), (error) => { const code = String(error?.code || error?.name || "unknown").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64); diagnose("import_rejected_" + code); console.error(error); process.exitCode = 1; });',
   ].join("");
 }
 
