@@ -50,8 +50,11 @@ afterEach(async () => {
 
 describe("ACPX installation integrity", () => {
   it("anchors dynamic provider package resolution at an explicit root", async () => {
-    const root = await mkdtemp(join(tmpdir(), "paperclip-acpx-package-root-"));
-    temporaryDirectories.push(root);
+    const parent = await mkdtemp(
+      join(tmpdir(), "paperclip-acpx-package-parent-"),
+    );
+    temporaryDirectories.push(parent);
+    const root = join(parent, "provider-pack");
     const providerDirectory = join(root, "node_modules", "qualified-provider");
     const providerPackageJson = join(providerDirectory, "package.json");
     await mkdir(providerDirectory, { recursive: true });
@@ -72,6 +75,56 @@ describe("ACPX installation integrity", () => {
     expect(() => createAcpxPackageJsonResolver(undefined)).toThrow(
       "explicit normalized absolute path",
     );
+
+    const ancestorProviderDirectory = join(
+      parent,
+      "node_modules",
+      "ancestor-provider",
+    );
+    await mkdir(ancestorProviderDirectory, { recursive: true });
+    await writeFile(
+      join(ancestorProviderDirectory, "package.json"),
+      JSON.stringify({ name: "ancestor-provider", version: "1.0.0" }),
+    );
+    expect(() =>
+      createAcpxPackageJsonResolver(root)("ancestor-provider"),
+    ).toThrow("outside the selected provider root");
+
+    const outsideProviderDirectory = join(parent, "outside-provider");
+    await mkdir(outsideProviderDirectory);
+    await writeFile(
+      join(outsideProviderDirectory, "package.json"),
+      JSON.stringify({ name: "linked-provider", version: "1.0.0" }),
+    );
+    await symlink(
+      outsideProviderDirectory,
+      join(root, "node_modules", "linked-provider"),
+    );
+    expect(() =>
+      createAcpxPackageJsonResolver(root)("linked-provider"),
+    ).toThrow("outside the selected provider root");
+  });
+
+  it("does not fall back through the server package for a missing rooted dependency", async () => {
+    const fixture = await installationFixture();
+    const nestedRuntimeDirectory = join(
+      fixture.serverDirectory,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    await mkdir(nestedRuntimeDirectory, { recursive: true });
+    await writeFile(
+      join(nestedRuntimeDirectory, "package.json"),
+      JSON.stringify({ version: "0.84.2" }),
+    );
+
+    await expect(
+      verifyQualifiedAcpxInstallation(fixture.profile, (packageName) => {
+        if (packageName === "pi-acp") return fixture.serverPackageJsonPath;
+        throw new Error("rooted package is absent");
+      }),
+    ).rejects.toThrow("rooted package is absent");
   });
 
   it("rejects an unregistered provider exit proof", async () => {

@@ -27,10 +27,18 @@ export function verifiedRuntimeExecutable(
   }
 
   if (platform === "darwin") {
-    if (!isAbsolute(configured) || resolve(configured) !== configured) {
+    if (
+      !isAbsolute(fallback) ||
+      resolve(fallback) !== fallback ||
+      configured !== fallback
+    ) {
       throw new Error("Verified runtime executable path is invalid");
     }
-    return configured;
+    // The Rust supervisor materializes the authenticated runtime as a private,
+    // read-only executable and starts this process from that exact pathname.
+    // Descendants may inherit the handoff variable, but they cannot nominate a
+    // different absolute path and have it treated as verified.
+    return fallback;
   }
 
   throw new Error(
