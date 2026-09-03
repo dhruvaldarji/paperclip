@@ -638,6 +638,15 @@ fn response_error_classification(error: &ResponseError) -> &'static str {
         "ACPX_MODEL_STATUS_UNAVAILABLE" => return "model_status_unavailable",
         "ACPX_MODEL_SELECTION_UNAVAILABLE" => return "model_selection_unavailable",
         "ACPX_EFFECTIVE_MODEL_MISMATCH" => return "effective_model_mismatch",
+        "PAPERCLIP_ACPX_ADMISSION_RECOVERY_BINDING" => return "admission_recovery_binding",
+        "PAPERCLIP_ACPX_ADMISSION_INSTALLATION" => return "admission_installation",
+        "PAPERCLIP_ACPX_ADMISSION_SANDBOX" => return "admission_sandbox",
+        "PAPERCLIP_ACPX_ADMISSION_CREDENTIAL" => return "admission_credential",
+        "PAPERCLIP_ACPX_ADMISSION_PROVIDER_LIFETIME" => return "admission_provider_lifetime",
+        "PAPERCLIP_ACPX_ADMISSION_COMMAND" => return "admission_command",
+        "PAPERCLIP_ACPX_ADMISSION_TOOL_BRIDGE" => return "admission_tool_bridge",
+        "PAPERCLIP_ACPX_ADMISSION_RUNTIME" => return "admission_runtime",
+        "PAPERCLIP_ACPX_ADMISSION_VERIFICATION" => return "admission_verification",
         _ => {}
     }
     match error.message.as_str() {
