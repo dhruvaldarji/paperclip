@@ -38,6 +38,21 @@ function waitForConcurrentClaimHeadStart(): Promise<void> {
   );
 }
 
+// A gate recovery attempt this file races against runs through several real
+// filesystem calls (link, lstat, readFile, rename) before it settles into a
+// stable state. A loaded CI runner can push that well past a short fixed
+// delay, so every assertion in this file that waits for recovery to reach a
+// specific gate state polls for it instead, bounded by this deadline.
+const ACPX_SANDBOX_GATE_STATE_TIMEOUT_MS = 10_000;
+
+async function waitForAcpxSandboxGateState<T>(
+  check: () => T | Promise<T>,
+): Promise<T> {
+  return await vi.waitFor(check, {
+    timeout: ACPX_SANDBOX_GATE_STATE_TIMEOUT_MS,
+  });
+}
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -729,10 +744,14 @@ describe("ACPX runtime sandbox", () => {
     // Finding anything other than this exact marker — the file gone, or a
     // fresh gate holding only this process's own acquisition token — proves
     // recovery removed the live replacement it found in place of the dead
-    // gate it inspected.
-    await expect(readFile(gatePath, "utf8")).resolves.toBe(
-      replacementGateContents,
-    );
+    // gate it inspected. Recovery reaches this state through several real
+    // filesystem calls after the head start above, so this polls for it
+    // rather than assuming the head start alone was enough time.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(readFile(gatePath, "utf8")).resolves.toBe(
+        replacementGateContents,
+      );
+    });
 
     // Free the replacement gate, as its own holder would on completing its
     // claim, so the still-retrying recovery call above can proceed.
@@ -803,10 +822,15 @@ describe("ACPX runtime sandbox", () => {
     expect(concurrentClaimSettled).toBe(false);
     // Finding anything other than this exact marker proves recovery — or
     // the concurrent claim's own recovery attempt — removed the live
-    // replacement instead of continuing to retry around it.
-    await expect(readFile(gatePath, "utf8")).resolves.toBe(
-      replacementGateContents,
-    );
+    // replacement instead of continuing to retry around it. Both retry
+    // attempts reach this state through several real filesystem calls after
+    // the head start above, so this polls for it rather than assuming the
+    // head start alone was enough time.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(readFile(gatePath, "utf8")).resolves.toBe(
+        replacementGateContents,
+      );
+    });
 
     // Free the replacement gate, as its own holder would on completing its
     // claim, so both still-retrying calls above can proceed.
@@ -821,6 +845,81 @@ describe("ACPX runtime sandbox", () => {
     await concurrentProcess!.removeOwnedAcpxRuntimeSandboxRoot(
       concurrentSandbox,
     );
+    await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
+
+  it("never clobbers a third claimant's gate when recovery cannot restore a captured live replacement", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    await writeFile(gatePath, String(deadHolder.pid), { flag: "wx" });
+
+    vi.resetModules();
+    const recoveringProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    // Recovery proves the dead gate stale, then atomically captures
+    // whatever now sits at the shared path with a single `rename`, which
+    // briefly vacates that path. This test places a live replacement there
+    // first, so the capture catches that replacement instead of the dead
+    // gate, then, in the instant the rename leaves the path empty, places a
+    // third claimant's own gate there before recovery's restore can land —
+    // the one case recovery cannot make race-free, because a genuine new
+    // claim through the shared path's own exclusivity primitive is
+    // indistinguishable from any other. Recovery must still never clobber
+    // that third claimant's gate, and must never lose the replacement it
+    // caught either.
+    const replacementGateContents = `${process.pid}:live-replacement`;
+    const thirdClaimantGateContents = `${process.pid}:third-claimant`;
+    const recovered = recoveringProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        beforeStaleGateRemoval: async () => {
+          await unlink(gatePath);
+          await writeFile(gatePath, replacementGateContents, { flag: "wx" });
+        },
+        afterStaleGateCapture: async () => {
+          await writeFile(gatePath, thirdClaimantGateContents, {
+            flag: "wx",
+          });
+        },
+      },
+    );
+
+    // Recovery's restore attempt reaches this state through several real
+    // filesystem calls, so this polls for it rather than assuming a fixed
+    // delay was enough time.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(readFile(gatePath, "utf8")).resolves.toBe(
+        thirdClaimantGateContents,
+      );
+    });
+
+    // The captured live replacement was not silently discarded: it is left
+    // behind under its own private name, off the shared path, exactly
+    // where the capturing rename first put it.
+    const strandedCaptures = (await readdir(dirname(gatePath))).filter(
+      (entry) => entry.includes(".reap-"),
+    );
+    expect(strandedCaptures).toHaveLength(1);
+    await expect(
+      readFile(join(dirname(gatePath), strandedCaptures[0]), "utf8"),
+    ).resolves.toBe(replacementGateContents);
+
+    // Free the third claimant's gate, as its own holder would on completing
+    // its claim, so the still-retrying recovery call above can proceed.
+    await unlink(gatePath);
+
+    const sandbox = await recovered;
+    expect(sandbox.root).toBe(probe.root);
     await recoveringProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
   });
 });
