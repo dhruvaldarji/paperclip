@@ -19,12 +19,13 @@ export interface QualifiedAcpxProfile {
   readonly commandDigest: string;
   readonly qualificationModel: string;
   /**
-   * Model identifier the pinned ACP server reports after accepting the exact
-   * qualification model. Most agents echo the requested model. Claude's ACP
-   * server deliberately exposes its stable SDK selector (`sonnet`) while the
-   * SDK resolves that selector to the canonical wire model
-   * (`claude-sonnet-5`). Paperclip verifies the exact request was accepted
-   * before treating this identifier as the qualified effective model.
+   * Model identifier the pinned ACP server accepts and reports. Profile
+   * resolution first binds the caller's exact canonical model request. Most
+   * agents use that same identifier at the ACP boundary; Claude exposes its
+   * stable SDK selector (`sonnet`) while the SDK resolves it to the canonical
+   * wire model (`claude-sonnet-5`). Paperclip selects only this profile-pinned
+   * identifier and verifies the provider reports it before publishing the
+   * canonical model as the qualified effective model.
    */
   readonly reportedModelId: string;
   readonly permissionPolicy: "interactive";
