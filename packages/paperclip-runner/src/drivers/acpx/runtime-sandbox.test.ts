@@ -12,6 +12,7 @@ import {
   stat,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1312,6 +1313,208 @@ describe("ACPX runtime sandbox", () => {
     } finally {
       dateNowSpy.mockRestore();
     }
+  });
+
+  it("never removes a replacement recovery lock a second admission has since acquired", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+    const recoveryLockPath = `${gatePath}.recovering`;
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    const deadHolderContents = String(deadHolder.pid);
+    await writeFile(gatePath, deadHolderContents, { flag: "wx" });
+
+    // A different admission crashed mid-recovery a while ago, leaving its
+    // own recovery lock behind. Backdate its mtime past the stale threshold
+    // directly, so this test never needs a real multi-second wait.
+    await writeFile(recoveryLockPath, "crashed-recoverer", { flag: "wx" });
+    const staleTimestamp = new Date(Date.now() - 6_000);
+    await utimes(recoveryLockPath, staleTimestamp, staleTimestamp);
+
+    vi.resetModules();
+    const breakingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    // Once this admission has pinned the crashed recoverer's stale lock and
+    // judged it old enough to break, but before it decides whether the
+    // shared path still names that exact pinned lock, replace the file at
+    // that same path with a fresh lock — simulating a second admission that
+    // has since genuinely won the now-momentarily-contested path and is
+    // itself recovering the same gate.
+    const replacementLockContents = `${process.pid}:live-replacement`;
+    const recovered = breakingProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      {
+        afterRecoveryLockStaleCapture: async () => {
+          // The pin never vacated the shared path: the stale lock this call
+          // inspected is still the exact thing sitting here.
+          await expect(readFile(recoveryLockPath, "utf8")).resolves.toBe(
+            "crashed-recoverer",
+          );
+          await unlink(recoveryLockPath);
+          await writeFile(recoveryLockPath, replacementLockContents, {
+            flag: "wx",
+          });
+        },
+      },
+    );
+
+    await waitForConcurrentClaimHeadStart();
+    // Finding anything other than this exact marker proves the break
+    // removed the live replacement lock instead of leaving it alone. This
+    // call reaches that decision through several real filesystem calls
+    // after the head start above, so this polls for it rather than
+    // assuming the head start alone was enough time.
+    await waitForAcpxSandboxGateState(async () => {
+      await expect(readFile(recoveryLockPath, "utf8")).resolves.toBe(
+        replacementLockContents,
+      );
+    });
+    expect(
+      (await readdir(dirname(gatePath))).filter((entry) =>
+        entry.includes(".recovering.reap-"),
+      ),
+    ).toHaveLength(0);
+    // The dead gate itself was never touched: this admission backed off
+    // once it found a replacement lock, instead of racing its own recovery
+    // of the gate underneath the replacement's holder.
+    await expect(readFile(gatePath, "utf8")).resolves.toBe(
+      deadHolderContents,
+    );
+
+    // Free the replacement lock, as its own holder would on finishing its
+    // own recovery, so the still-retrying call above can win the now-clear
+    // lock and recover the dead gate for itself.
+    await unlink(recoveryLockPath);
+
+    const sandbox = await recovered;
+    expect(sandbox.root).toBe(probe.root);
+    await breakingProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
+
+  it("keeps the gate's own recovery exclusive to one admission while a separate crashed recoverer's stale lock is being broken", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+    const recoveryLockPath = `${gatePath}.recovering`;
+
+    // A holder crashed while it held the gate: write a gate file naming a
+    // process that has already exited.
+    const deadHolder = spawnSync(process.execPath, ["-e", "0"]);
+    const deadHolderContents = String(deadHolder.pid);
+    await writeFile(gatePath, deadHolderContents, { flag: "wx" });
+
+    // A third admission crashed mid-recovery a while ago, leaving its own
+    // recovery lock behind. Backdate its mtime past the stale threshold
+    // directly, so this test never needs a real multi-second wait.
+    await writeFile(recoveryLockPath, "crashed-recoverer", { flag: "wx" });
+    const staleTimestamp = new Date(Date.now() - 6_000);
+    await utimes(recoveryLockPath, staleTimestamp, staleTimestamp);
+
+    vi.resetModules();
+    const firstProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    let releaseFirstCapture: () => void = () => {};
+    const firstCapturePaused = new Promise<void>((settle) => {
+      releaseFirstCapture = settle;
+    });
+    const firstRecovered = firstProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      { afterRecoveryLockStaleCapture: () => firstCapturePaused },
+    );
+
+    // Wait until the first admission has pinned the crashed recoverer's
+    // stale lock and judged it old enough to break, so the second admission
+    // below races the same still-physically-present stale lock, not one
+    // already cleared.
+    await waitForAcpxSandboxGateState(async () => {
+      const entries = await readdir(dirname(gatePath));
+      expect(
+        entries.some((entry) => entry.includes(".recovering.reap-")),
+      ).toBe(true);
+    });
+
+    // A second, real admission also finds the gate busy and the same stale
+    // lock in its way. Unopposed, it breaks the crashed recoverer's stale
+    // lock for real, then wins a fresh lock of its own — paused here,
+    // before it ever touches the dead gate, so its own lock stays live at
+    // the shared path.
+    vi.resetModules();
+    const secondProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+    let releaseSecondLock: () => void = () => {};
+    const secondLockPaused = new Promise<void>((settle) => {
+      releaseSecondLock = settle;
+    });
+    const secondRecovered = secondProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      { afterRecoveryLockAcquired: () => secondLockPaused },
+    );
+
+    // The second admission's own fresh recovery lock is now live at the
+    // shared path, created only after it broke the crashed recoverer's
+    // stale one for real. A real lock carries no content — like the lease
+    // files beside it, only its presence and its age ever matter — so its
+    // identity, not its content, is what proves whether it survives
+    // untouched: an admission that deletes it and creates its own new one
+    // in its place would look identical by content alone.
+    const freshLockIdentity = await waitForAcpxSandboxGateState(async () => {
+      const contents = await readFile(recoveryLockPath, "utf8").catch(
+        () => null,
+      );
+      expect(contents).not.toBeNull();
+      expect(contents).not.toBe("crashed-recoverer");
+      return await lstat(recoveryLockPath, { bigint: true });
+    });
+
+    // The first admission resumes its own break attempt now: its capture of
+    // the shared path must land on this fresh, live lock, not the crashed
+    // recoverer's lock it originally pinned — and it must never remove it,
+    // or a second admission would end up recovering the same dead gate
+    // concurrently with the first.
+    releaseFirstCapture();
+    // Give the first admission's retry loop several real cycles to act, so
+    // a wrongly displaced lock has ample opportunity to show up here.
+    for (let cycle = 0; cycle < 8; cycle += 1) {
+      await waitForConcurrentClaimHeadStart();
+    }
+    const lockIdentityAfterFirstResumed = await lstat(recoveryLockPath, {
+      bigint: true,
+    });
+    expect(lockIdentityAfterFirstResumed.dev).toBe(freshLockIdentity.dev);
+    expect(lockIdentityAfterFirstResumed.ino).toBe(freshLockIdentity.ino);
+    // The dead gate itself was never touched by the first admission: only
+    // the second admission, the sole real holder of a live recovery lock,
+    // may recover it.
+    await expect(readFile(gatePath, "utf8")).resolves.toBe(
+      deadHolderContents,
+    );
+
+    // The second admission now proceeds to recover the dead gate for real,
+    // exclusively — the first admission never got to touch it. Both
+    // admissions can claim this same, now-freed root, exactly like any two
+    // admissions racing a freshly recovered root, so this waits for both to
+    // settle before tearing either down.
+    releaseSecondLock();
+    const [secondSandbox, firstSandbox] = await Promise.all([
+      secondRecovered,
+      firstRecovered,
+    ]);
+    expect(secondSandbox.root).toBe(probe.root);
+    expect(firstSandbox.root).toBe(probe.root);
+    await secondProcess.removeOwnedAcpxRuntimeSandboxRoot(secondSandbox);
+    await firstProcess.removeOwnedAcpxRuntimeSandboxRoot(firstSandbox);
   });
 });
 
