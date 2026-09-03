@@ -117,13 +117,18 @@ const ACPX_SANDBOX_ROOT_GATE_RETRY_DELAY_MS = 15;
 // Infix for the private path stale-gate recovery renames a gate to while it
 // checks the gate's identity. See `breakStaleAcpxRuntimeSandboxRootGate`.
 const ACPX_SANDBOX_ROOT_GATE_REAP_INFIX = ".reap-";
-// A holder writes its pid and token right after it creates the gate file,
-// with no other I/O step between the two calls. A gate that still carries
-// no readable pid after this much time has passed since its creation did
-// not just lose a short race with its own holder's write: its creator most
-// likely exited before it could write. This grace period must stay well
-// under `ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS`, so a waiting admission
-// gets more than one chance to recover the gate before it gives up.
+// Infix for the private path a holder stages its own gate content on before
+// it publishes that content to the shared path. See
+// `acquireAcpxRuntimeSandboxRootGate`.
+const ACPX_SANDBOX_ROOT_GATE_STAGE_INFIX = ".stage-";
+// A gate never appears at the shared path until its holder has already
+// written its full pid and token to it — see
+// `acquireAcpxRuntimeSandboxRootGate`. So a gate that carries no readable
+// pid did not lose a race with a slow write, no matter how long that write
+// took: its content was lost or damaged after publication. This grace
+// period guards only that damage case, and must stay well under
+// `ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS`, so a waiting admission gets
+// more than one chance to recover the gate before it gives up.
 const ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS = 1_000;
 
 export interface AcpxRuntimeSandbox {
@@ -408,6 +413,15 @@ export interface AcpxRuntimeSandboxPrepareDependencies {
    * before the rest of the sandbox is built.
    */
   afterRootOwned?: () => Promise<void>;
+  /**
+   * Internal test seam. Runs once a gate acquisition has written its own
+   * pid and token to a private staging path in full, immediately before it
+   * publishes that content to the shared path. Lets a test hold a
+   * still-forming gate here, to prove no other process can ever observe it
+   * at the shared path before its content is complete — however long the
+   * write itself takes.
+   */
+  afterGateContentStaged?: () => Promise<void>;
   /**
    * Internal test seam. Runs once stale-gate recovery has pinned the gate
    * currently at the shared path with an extra link and proved its holder
@@ -747,6 +761,10 @@ function acpxRuntimeSandboxRootGatePath(root: string): string {
 }
 
 interface AcpxRuntimeSandboxRootGateDependencies {
+  /** Internal seam that runs once a gate acquisition has staged its own
+   * content in full, immediately before it publishes that content to the
+   * shared path. Exercised only in tests. */
+  afterGateContentStaged?: () => Promise<void>;
   beforeStaleGateRemoval?: () => Promise<void>;
   /** Internal seam for racing a third claimant into the moment between the
    * atomic capture and the restore in `removeStaleAcpxRuntimeSandboxRootGate`,
@@ -770,7 +788,10 @@ async function withAcpxRuntimeSandboxRootGate<T>(
   const gatePath = acpxRuntimeSandboxRootGatePath(root);
   const deadline = Date.now() + ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS;
   for (;;) {
-    const ownContent = await acquireAcpxRuntimeSandboxRootGate(gatePath);
+    const ownContent = await acquireAcpxRuntimeSandboxRootGate(
+      gatePath,
+      dependencies,
+    );
     if (ownContent !== null) {
       try {
         return await criticalSection();
@@ -794,23 +815,23 @@ async function withAcpxRuntimeSandboxRootGate<T>(
 // Returns this holder's own gate content on success, so its later release
 // can identify its own gate by content rather than by trusting `gatePath`
 // still names it (see `releaseAcpxRuntimeSandboxRootGate`).
+//
+// Writes the full gate content to a private staging path first, then
+// publishes it to the shared path with one atomic `link`. Creating an empty
+// file directly at the shared path, then writing its content there in a
+// later, separate call, would leave the shared path naming an
+// identity-less gate for as long as that second call took. On a loaded
+// host, a live holder's own write can take longer than stale-gate
+// recovery's fixed grace period (`ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS`),
+// so recovery could then remove a gate its holder still owns. Staging the
+// content first closes this gap by construction: the shared path never
+// names this holder's gate until its content already exists in full, no
+// matter how long the write itself takes.
 async function acquireAcpxRuntimeSandboxRootGate(
   gatePath: string,
+  dependencies: AcpxRuntimeSandboxRootGateDependencies = {},
 ): Promise<string | null> {
-  let handle: FileHandle;
-  try {
-    handle = await open(
-      gatePath,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        (constants.O_NOFOLLOW ?? 0),
-      PRIVATE_FILE_MODE,
-    );
-  } catch (error) {
-    if (errorCode(error) === "EEXIST") return null;
-    throw error;
-  }
+  const stagingPath = `${gatePath}${ACPX_SANDBOX_ROOT_GATE_STAGE_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
   // The holder pid, plus a random per-acquisition token so this exact gate
   // instance can be told apart from a same-pid replacement created at the
   // same path later. A device-and-inode check cannot do this: a delete
@@ -818,12 +839,37 @@ async function acquireAcpxRuntimeSandboxRootGate(
   // just-freed inode number on some filesystems (observed on ext4), so a
   // replacement gate can carry the very same identity the deleted one had.
   const content = `${process.pid}:${randomBytes(16).toString("hex")}`;
+  const handle = await open(
+    stagingPath,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      (constants.O_NOFOLLOW ?? 0),
+    PRIVATE_FILE_MODE,
+  );
   try {
     await handle.chmod(PRIVATE_FILE_MODE);
     await handle.writeFile(content, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
+  }
+  try {
+    await dependencies.afterGateContentStaged?.();
+    // `link` never opens through `gatePath`, unlike `open` with
+    // O_CREAT|O_EXCL: it either creates a new name for the staged content
+    // there, in one call, or fails outright, so a symlink planted at
+    // `gatePath` can never be followed either way.
+    await link(stagingPath, gatePath);
+  } catch (error) {
+    // Another holder's gate already names the shared path: this call lost
+    // the race to acquire it.
+    if (errorCode(error) === "EEXIST") return null;
+    throw error;
+  } finally {
+    await unlink(stagingPath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
   }
   return content;
 }
@@ -897,14 +943,19 @@ async function reclaimAcpxRuntimeSandboxRootGateCapture(
 // live holder's gate must stay exclusive at the shared path for as long as
 // that holder keeps it there.
 //
-// A gate can also carry no readable pid at all: its holder crashed between
-// creating the gate file and writing its pid and token to it. This call
-// cannot check a dead-or-alive pid it cannot read, so it instead falls back
-// to the gate's own age. A gate with no readable pid, still that way after
-// `ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS` has passed since its creation, did
-// not just lose a short race with its own holder's write: treat it the same
-// as a gate whose holder proved dead. A gate younger than that grace period
-// is left alone, the same as a gate a live holder still owns.
+// A gate can also carry no readable pid at all. Its holder always writes
+// the pid and token to a private staging path in full, then publishes that
+// content to the shared path with one atomic `link` — see
+// `acquireAcpxRuntimeSandboxRootGate` — so a gate that names the shared
+// path never starts out empty, no matter how long its holder's write took.
+// An unreadable gate therefore means its content was lost or damaged after
+// publication, not that its holder is still writing it. This call cannot
+// check a dead-or-alive pid it cannot read, so it instead falls back to the
+// gate's own age, purely as a safety net against that damage: a gate with
+// no readable pid, still that way after `ACPX_SANDBOX_ROOT_GATE_INIT_GRACE_MS`
+// has passed since its creation, is treated the same as a gate whose holder
+// proved dead. A gate younger than that grace period is left alone, the
+// same as a gate a live holder still owns.
 //
 // A plain read-then-unlink cannot inspect and remove safely: whatever this
 // call reads to confirm identity, a later, separate unlink call still

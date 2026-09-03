@@ -696,6 +696,65 @@ describe("ACPX runtime sandbox", () => {
     }
   });
 
+  it("never lets stale-gate recovery observe a live holder's gate before its content is complete, however long the write takes", async () => {
+    const fixture = await sandboxFixture("codex");
+    const probe = await prepareAcpxRuntimeSandbox({
+      binding: fixture.binding,
+      agent: "codex",
+    });
+    await releaseAcpxRuntimeSandboxRootClaim(probe);
+    const gatePath = join(dirname(probe.root), `${basename(probe.root)}.gate`);
+
+    vi.resetModules();
+    const holdingProcess: typeof import("./runtime-sandbox.js") =
+      await import("./runtime-sandbox.js");
+
+    // A holder's own write of its pid and token is delayed well past the
+    // stale-gate recovery grace period — a loaded host, not a crash. Hold
+    // it here, right after its content is staged in full on a private
+    // path, but before that content is published to the shared path.
+    let releaseHold: (() => void) | null = null;
+    const holdUntilReleased = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const holding = holdingProcess.prepareAcpxRuntimeSandbox(
+      { binding: fixture.binding, agent: "codex" },
+      { afterGateContentStaged: async () => holdUntilReleased },
+    );
+    await waitForConcurrentClaimHeadStart();
+
+    // The shared path must not name anything yet: this holder's content is
+    // already complete on its private staging path, but not yet published
+    // to the shared path.
+    await expect(stat(gatePath)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // Move the clock forward well past the gate's initialization grace
+    // period, the same way real elapsed time would, without a real
+    // multi-second wait.
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + 1_500);
+    try {
+      // Even once the grace period has elapsed, there is still nothing at
+      // the shared path for a concurrent stale-gate recovery to find, let
+      // alone mistake for an identity-less gate and reap: a write that
+      // outlasts the grace period can never cost this holder its gate.
+      await expect(stat(gatePath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    // The holder finishes staging and publishes its gate, the same way a
+    // real delayed write eventually completes.
+    releaseHold!();
+    const sandbox = await holding;
+    expect(sandbox.root).toBe(probe.root);
+    await expect(readFile(gatePath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await holdingProcess.removeOwnedAcpxRuntimeSandboxRoot(sandbox);
+  });
+
   it("never removes a live gate that replaced the stale gate recovery inspected", async () => {
     const fixture = await sandboxFixture("codex");
     const probe = await prepareAcpxRuntimeSandbox({
