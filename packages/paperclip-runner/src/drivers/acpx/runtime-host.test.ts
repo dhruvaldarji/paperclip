@@ -27,6 +27,7 @@ import {
 } from "./runtime-host.js";
 import {
   prepareAcpxRuntimeSandbox,
+  removeOwnedAcpxRuntimeSandboxRoot,
   type AcpxRuntimeSandbox,
 } from "./runtime-sandbox.js";
 
@@ -562,6 +563,89 @@ describe("ACPX runtime host", () => {
     await expect(readFile(authPath)).rejects.toMatchObject({ code: "ENOENT" });
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ["credential", "credential staging failed"],
+    ["command", "command open failed"],
+    ["runtime open", "provider open failed"],
+    ["post-handshake verification", "model status failed"],
+  ])(
+    "releases the sandbox lease when %s fails after sandbox acquisition",
+    async (_stage, failureMessage) => {
+      const fixture = await hostFixture();
+      const prepareSandbox: NonNullable<
+        AcpxRuntimeHostDependencies["prepareSandbox"]
+      > = vi.fn((input) => prepareAcpxRuntimeSandbox(input));
+      const dependencies = fixture.dependencies({
+        openRuntime: async () => {
+          if (failureMessage === "provider open failed") {
+            throw new Error(failureMessage);
+          }
+          return runtimePort({
+            getStatus:
+              failureMessage === "model status failed"
+                ? async () => {
+                    throw new Error(failureMessage);
+                  }
+                : undefined,
+          });
+        },
+      });
+      dependencies.prepareSandbox = prepareSandbox;
+      if (failureMessage === "credential staging failed") {
+        dependencies.stageCredential = async () => {
+          throw new Error(failureMessage);
+        };
+      }
+      if (failureMessage === "command open failed") {
+        dependencies.verifyInstallation = async (profile) => ({
+          commandDigest: profile.commandDigest,
+          agentServerPackageJsonPath: join(fixture.root, "package.json"),
+          agentRuntimePackageJsonPath: null,
+          openCommand: async () => {
+            throw new Error(failureMessage);
+          },
+        });
+      }
+
+      await expect(
+        AcpxRuntimeHost.open(
+          {
+            ...fixture.options,
+            agent: "codex",
+            model: "gpt-5.6-sol",
+            permissionMode: "approve-all",
+            environment: {
+              PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET:
+                '{"tokens":{"access_token":"canary"}}',
+            },
+          },
+          dependencies,
+        ),
+      ).rejects.toThrow(/failed/);
+
+      const sandbox: AcpxRuntimeSandbox =
+        await prepareSandbox.mock.results[0]!.value;
+      // The root itself is never deleted outright: a later admission for
+      // the same session may still reuse it.
+      await expect(stat(sandbox.root)).resolves.toBeDefined();
+
+      // The claim this admission never released would otherwise pin the
+      // marker to its own identifier forever, so no later admission could
+      // ever win delete authority over this root. Reuse the exact binding
+      // this admission built its sandbox from to claim the root again, and
+      // prove that claim now carries real delete authority.
+      const [{ binding }] = prepareSandbox.mock.calls[0]!;
+      const retriedSandbox = await waitForAcpxAdmission(() =>
+        prepareAcpxRuntimeSandbox({ binding, agent: "codex" }),
+      );
+      expect(retriedSandbox.root).toBe(sandbox.root);
+      await removeOwnedAcpxRuntimeSandboxRoot(retriedSandbox);
+      await expect(stat(sandbox.root)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
 
   it("retains failed admission cleanup until provider shutdown permits credential scrub", async () => {
     const fixture = await hostFixture();

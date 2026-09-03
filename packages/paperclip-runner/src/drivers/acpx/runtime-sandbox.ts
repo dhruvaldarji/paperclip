@@ -401,21 +401,15 @@ export interface AcpxRuntimeSandboxPrepareDependencies {
    */
   afterRootOwned?: () => Promise<void>;
   /**
-   * Internal test seam. Runs after stale-gate recovery has read a gate file
-   * and proved its holder is dead, immediately before recovery renames the
-   * gate to a private path to inspect and remove it. Lets a test replace
+   * Internal test seam. Runs once stale-gate recovery has pinned the gate
+   * currently at the shared path with an extra link and proved its holder
+   * is dead, immediately before recovery checks whether the shared path
+   * still names that exact pinned gate and removes it. Lets a test replace
    * the gate at the shared path in that gap, to prove recovery only ever
-   * removes the exact gate instance it inspected — never a replacement.
+   * removes the exact gate instance it pinned — never a replacement, and
+   * never by disturbing the shared path first.
    */
   beforeStaleGateRemoval?: () => Promise<void>;
-  /**
-   * Internal test seam. Runs after stale-gate recovery has renamed a gate
-   * to a private path and found its bytes do not match the dead gate it
-   * inspected, immediately before recovery links that captured file back
-   * onto the shared path. Lets a test create a fresh gate at the shared
-   * path in that gap, to prove the restore never overwrites it.
-   */
-  beforeStaleGateRestore?: () => Promise<void>;
 }
 
 /** Prepare the private filesystem and environment visible to an ACPX agent. */
@@ -738,7 +732,6 @@ function acpxRuntimeSandboxRootGatePath(root: string): string {
 
 interface AcpxRuntimeSandboxRootGateDependencies {
   beforeStaleGateRemoval?: () => Promise<void>;
-  beforeStaleGateRestore?: () => Promise<void>;
 }
 
 /**
@@ -819,96 +812,93 @@ async function acquireAcpxRuntimeSandboxRootGate(
 // Removes a gate file left behind by a holder process that no longer exists,
 // so a hard process crash inside the critical section cannot block every
 // later admission for this root forever. Never removes a gate whose holder
-// is still alive, or one this process cannot prove is dead.
+// is still alive, or one this process cannot prove is dead, and never makes
+// the shared path briefly name nothing — a live holder's gate must stay
+// exclusive at the shared path for as long as that holder keeps it there.
 //
-// Another admission can replace the gate at this same path — release the
-// stale one and create a fresh, live one — at any point after this call
-// proves the original holder dead. A plain read-then-unlink cannot guard
-// against this: whatever this call reads to confirm identity, a later,
-// separate unlink call still removes the file the path names at that later
-// moment, not the file this call read. Two calls can never be made atomic
-// by re-reading closer to the unlink; the gap only shrinks, it does not
-// close.
+// A plain read-then-unlink cannot inspect and remove safely: whatever this
+// call reads to confirm identity, a later, separate unlink call still
+// removes the file the path names at that later moment, not the file this
+// call read. Two calls can never be made atomic by re-reading closer to the
+// unlink; the gap only shrinks, it does not close. An earlier version of
+// this function closed that gap by capturing the gate with `rename` before
+// inspecting it — but `rename` vacates the shared path for the whole
+// inspection, and a fresh claimant that creates a new gate in that gap is
+// left believing it holds exclusivity while a delayed restore can still
+// silently take its place, or a delayed restore can find the path already
+// claimed and abandon the gate it captured, orphaning whichever holder
+// created that original gate.
 //
-// So this function never unlinks the shared path directly. It first
-// `rename`s the gate to a private path only this call knows, one syscall
-// that always moves whatever the shared path currently names — never stale
-// information this call read earlier. That syscall is the one and only
-// place this call touches the shared path, so there is no later, separate
-// step left for a replacement to land in front of. It then inspects the
-// private copy at leisure:
-// - If the bytes match the dead gate this call proved stale, the private
-//   copy is that same dead gate; deleting it is always safe, because no
-//   other admission can name a private path only this call knows.
-// - If the bytes differ, this call's `rename` caught a live replacement
-//   instead. It puts that replacement back with `link`, which — unlike
-//   `rename` — fails instead of overwriting when the shared path already
-//   names something else again, so a second replacement can never be
-//   clobbered by a restore that arrives late.
-//
-// A device-and-inode check cannot stand in for the byte comparison above:
-// deleting a file and immediately creating a new one at the same path can
-// reuse the just-freed inode number on some filesystems, so a replacement
-// gate can carry the very identity the deleted one had. The byte comparison
-// instead keys on the holder pid plus the random per-acquisition token
-// `acquireAcpxRuntimeSandboxRootGate` writes; a collision between two
-// gates' random tokens is not a practical concern.
+// This function instead pins whatever currently occupies the shared path
+// with an extra `link` first. Unlike `rename`, `link` adds a second name for
+// the same inode without ever removing the first, so the shared path is
+// never vacated: a genuinely live holder's gate stays exclusive there for
+// the holder's entire critical section, no matter how this call's inspection
+// of its own pinned copy turns out. The pin also keeps that exact inode
+// alive for as long as this call holds it, so a later identity check against
+// it can never be confused by a filesystem reusing a freed inode number for
+// an unrelated new file at the same path — the well-known hazard a bare
+// device-and-inode check runs into (observed on ext4). Only once this call
+// has proved, from its own pinned copy, that the holder is dead does it
+// remove the shared name — and only if the shared path still names that
+// exact pinned inode at that moment. A live holder that claims the path
+// meanwhile always creates a fresh file, so it can never land on this call's
+// already-pinned identity, and this call never removes it.
 async function breakStaleAcpxRuntimeSandboxRootGate(
   gatePath: string,
   dependencies: AcpxRuntimeSandboxRootGateDependencies = {},
 ): Promise<void> {
-  let holderPid: number | null = null;
-  let inspectedContents: string;
-  try {
-    const handle = await open(
-      gatePath,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-    );
-    try {
-      const bytes = await readFile(handle);
-      inspectedContents = bytes.toString("utf8").trim();
-      const parsed = Number.parseInt(inspectedContents, 10);
-      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-    } finally {
-      await handle.close();
-    }
-  } catch {
-    // Missing, unreadable, or malformed: nothing provable to break here.
-    return;
-  }
-  if (holderPid !== null && isAcpxSandboxRootGateHolderAlive(holderPid)) {
-    return;
-  }
-  await dependencies.beforeStaleGateRemoval?.();
-
   const capturePath = `${gatePath}${ACPX_SANDBOX_ROOT_GATE_REAP_INFIX}${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
-    await rename(gatePath, capturePath);
+    await link(gatePath, capturePath);
   } catch (error) {
-    // Gone already, or another recovery call reaped it first: nothing left
-    // to break.
+    // Missing already: nothing to break.
     if (errorCode(error) === "ENOENT") return;
     throw error;
   }
-
-  const capturedContents = (await readFile(capturePath))
-    .toString("utf8")
-    .trim();
-  if (capturedContents !== inspectedContents) {
-    // This call's rename caught a live replacement, not the dead gate it
-    // inspected. Put it back — unless a newer replacement already claims
-    // the path, in which case leave that one alone and drop the copy this
-    // call is holding.
-    await dependencies.beforeStaleGateRestore?.();
+  try {
+    let holderPid: number | null = null;
     try {
-      await link(capturePath, gatePath);
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST") throw error;
+      const bytes = await readFile(capturePath);
+      const contents = bytes.toString("utf8").trim();
+      const parsed = Number.parseInt(contents, 10);
+      holderPid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      // Unreadable or malformed: nothing provable to break here.
+      return;
     }
+    if (holderPid !== null && isAcpxSandboxRootGateHolderAlive(holderPid)) {
+      return;
+    }
+    await dependencies.beforeStaleGateRemoval?.();
+
+    const pinnedEntry = await lstat(capturePath, { bigint: true });
+    const sharedEntry = await lstat(gatePath, { bigint: true }).catch(
+      (error) => {
+        if (errorCode(error) === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (
+      sharedEntry !== null &&
+      sharedEntry.dev === pinnedEntry.dev &&
+      sharedEntry.ino === pinnedEntry.ino
+    ) {
+      // The shared path still names the exact dead gate this call pinned
+      // and proved stale: safe to remove.
+      await unlink(gatePath).catch((error) => {
+        if (errorCode(error) !== "ENOENT") throw error;
+      });
+    }
+    // A mismatch means a live holder already claimed the shared path with a
+    // fresh gate before this call reached its identity check. This call
+    // never touched the shared path, so that live gate was never disturbed
+    // and there is nothing to restore.
+  } finally {
+    await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
   }
-  await unlink(capturePath).catch((error) => {
-    if (errorCode(error) !== "ENOENT") throw error;
-  });
 }
 
 function isAcpxSandboxRootGateHolderAlive(pid: number): boolean {

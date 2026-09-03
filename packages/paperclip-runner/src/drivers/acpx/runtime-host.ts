@@ -202,6 +202,7 @@ interface RetainedAcpxAdmissionCleanup {
   readonly toolBridge: RunnerToolBridge | null;
   readonly credential: AcpxProviderLifetimeLease | null;
   readonly command: VerifiedAcpxCommandLease | null;
+  readonly sandbox: AcpxRuntimeSandbox | null;
   readonly reason: string;
   recovery: Promise<void> | null;
   timer: ReturnType<typeof setTimeout> | null;
@@ -293,6 +294,7 @@ export class AcpxRuntimeHost {
     if (installation.commandDigest !== profile.commandDigest) {
       throw new Error("Verified ACPX installation does not match its profile");
     }
+    let sandbox: AcpxRuntimeSandbox | null = null;
     let command: VerifiedAcpxCommandLease | null = null;
     let credential: AcpxProviderLifetimeLease | null = null;
     let toolBridge: RunnerToolBridge | null = null;
@@ -326,6 +328,7 @@ export class AcpxRuntimeHost {
         await cleanupAbortedRuntimeAdmission(
           null,
           retained.credential,
+          sandbox,
           "ACPX rejected runtime admission cleanup confirmed",
         );
         retainedRejectedRuntimeAdmissions.delete(retained);
@@ -335,7 +338,7 @@ export class AcpxRuntimeHost {
       retainRuntimeHostCleanup(ownedCleanup);
     };
     try {
-      const sandbox = await acquireAbortableAdmissionResource({
+      sandbox = await acquireAbortableAdmissionResource({
         signal: options.signal,
         acquire: () =>
           (dependencies.prepareSandbox ?? prepareAcpxRuntimeSandbox)({
@@ -349,12 +352,15 @@ export class AcpxRuntimeHost {
         reportFailure: (failure) =>
           dependencies.reportRetainedCleanupFailure(failure),
       });
+      // Every stage from here on runs after the sandbox has been claimed, so
+      // it is always populated for the remainder of this admission attempt.
+      const claimedSandbox = sandbox;
       if (options.agent === "codex") {
         credential = await acquireAbortableAdmissionResource({
           signal: options.signal,
           acquire: () =>
             (dependencies.stageCredential ?? stageManagedCodexCredential)({
-              agentHomeDirectory: sandbox.agentHomeDirectory,
+              agentHomeDirectory: claimedSandbox.agentHomeDirectory,
               environment: options.environment,
               sourcePath: options.managedCodexCredentialSourcePath,
             }),
@@ -368,7 +374,7 @@ export class AcpxRuntimeHost {
           signal: options.signal,
           acquire: () =>
             acquireAcpxProviderLifetimeLease({
-              agentHomeDirectory: sandbox.agentHomeDirectory,
+              agentHomeDirectory: claimedSandbox.agentHomeDirectory,
             }),
           resource: "provider_lifetime",
           releaseLate: (lateLifetime) => lateLifetime.close(),
@@ -406,13 +412,13 @@ export class AcpxRuntimeHost {
             command: command!,
             profile,
             cwd: binding.workspacePath,
-            stateDirectory: sandbox.stateDirectory,
+            stateDirectory: claimedSandbox.stateDirectory,
             providerSessionKey: binding.profileSessionKey,
             permissionMode: binding.permissionMode,
             permissionPolicy: acpxRuntimePermissionPolicy(
               binding.permissionMode,
             ),
-            launchEnvironment: sandbox.launchEnvironment,
+            launchEnvironment: claimedSandbox.launchEnvironment,
             credentialFenceFds: admittedLifetime.lifetimeFenceFds,
             activateCredentialFenceOwner:
               admittedLifetime.activateLifetimeOwner.bind(admittedLifetime),
@@ -450,6 +456,7 @@ export class AcpxRuntimeHost {
           retainAbortedRuntimeAdmissionCleanup({
             pendingRuntime,
             credential,
+            sandbox,
             reason: "ACPX runtime admission aborted",
             failedAdmissionCleanupTransfer,
           });
@@ -490,11 +497,18 @@ export class AcpxRuntimeHost {
         toolBridge,
       });
     } catch (error) {
+      // A pending runtime that raced the abort signal owns its credential,
+      // and therefore the sandbox it runs in, through the deferred cleanup
+      // that `onAbortedPending` or `retainFailedAdmissionCleanup` wired up
+      // above. This immediate cleanup must not also release the sandbox
+      // claim while that deferred close still uses the sandbox.
+      const sandboxOwnedHere = pendingRuntimeOwnsCredential ? null : sandbox;
       const cleanup = cleanupRuntimeResources(
         runtime,
         toolBridge,
         pendingRuntimeOwnsCredential ? null : credential,
         command,
+        sandboxOwnedHere,
         "ACPX runtime initialization failed",
       );
       retainRuntimeHostCleanup(cleanup);
@@ -505,6 +519,7 @@ export class AcpxRuntimeHost {
           toolBridge,
           credential: pendingRuntimeOwnsCredential ? null : credential,
           command,
+          sandbox: sandboxOwnedHere,
           reason: "ACPX runtime initialization failed",
         });
       });
@@ -630,6 +645,9 @@ export class AcpxRuntimeHost {
       this.#toolBridge,
       this.#credential,
       this.#command,
+      // Omit the sandbox here. This close releases its claim explicitly
+      // below, so passing it here would release the same claim twice.
+      null,
       reason,
     );
     if (cleanupError) errors.push(...cleanupError.errors);
@@ -748,12 +766,18 @@ function raceAdmissionWithAbort<T>(
 function retainAbortedRuntimeAdmissionCleanup(input: {
   pendingRuntime: Promise<AcpxRuntimePort>;
   credential: AcpxProviderLifetimeLease | null;
+  sandbox: AcpxRuntimeSandbox | null;
   reason: string;
   failedAdmissionCleanupTransfer: Promise<void>;
 }): void {
   const cleanup = input.pendingRuntime.then(
     (runtime) =>
-      cleanupAbortedRuntimeAdmission(runtime, input.credential, input.reason),
+      cleanupAbortedRuntimeAdmission(
+        runtime,
+        input.credential,
+        input.sandbox,
+        input.reason,
+      ),
     () => input.failedAdmissionCleanupTransfer,
   );
   retainRuntimeHostCleanup(cleanup);
@@ -762,6 +786,7 @@ function retainAbortedRuntimeAdmissionCleanup(input: {
 async function cleanupAbortedRuntimeAdmission(
   runtime: AcpxRuntimePort | null,
   credential: AcpxProviderLifetimeLease | null,
+  sandbox: AcpxRuntimeSandbox | null,
   reason: string,
 ): Promise<void> {
   const cleanupError = await cleanupRuntimeResources(
@@ -769,6 +794,7 @@ async function cleanupAbortedRuntimeAdmission(
     null,
     credential,
     null,
+    sandbox,
     reason,
   );
   if (!cleanupError) return;
@@ -777,6 +803,7 @@ async function cleanupAbortedRuntimeAdmission(
     toolBridge: null,
     credential,
     command: null,
+    sandbox,
     reason,
   });
 }
@@ -786,6 +813,7 @@ function retainFailedAcpxAdmissionCleanup(input: {
   toolBridge: RunnerToolBridge | null;
   credential: AcpxProviderLifetimeLease | null;
   command: VerifiedAcpxCommandLease | null;
+  sandbox: AcpxRuntimeSandbox | null;
   reason: string;
 }): void {
   const cleanup: RetainedAcpxAdmissionCleanup = {
@@ -813,6 +841,7 @@ function startRetainedAcpxAdmissionCleanup(
         cleanup.toolBridge,
         cleanup.credential,
         cleanup.command,
+        cleanup.sandbox,
         `${cleanup.reason} (automatic cleanup recovery ${attempt})`,
       );
       if (!cleanupError) {
@@ -988,6 +1017,7 @@ async function cleanupRuntimeResources(
   toolBridge: RunnerToolBridge | null,
   credential: AcpxProviderLifetimeLease | null,
   command: VerifiedAcpxCommandLease | null,
+  sandbox: AcpxRuntimeSandbox | null,
   reason: string,
 ): Promise<AggregateError | null> {
   const settle = async (
@@ -1029,6 +1059,22 @@ async function cleanupRuntimeResources(
     credentialOutcome,
   ]);
   const errors = outcomes.filter((error): error is unknown => error !== null);
+  // This admission failed, so it never reached a live host. Release its
+  // own occupancy lease, and its delete-authority claim on the marker if
+  // no other admission still holds a lease — the same release a live
+  // host's own close does. A later admission for the same deterministic
+  // session root can then reuse it, or win delete authority and remove it
+  // once nothing else needs it. Release the lease only once every
+  // resource that reads or writes inside the root has fully closed, so no
+  // other admission's lease count can run while this admission still uses
+  // the root. A failure here re-enters this same retry path, so a later
+  // attempt releases the lease once the rest of the state has settled.
+  if (errors.length === 0 && sandbox !== null) {
+    const sandboxError = await settle(() =>
+      releaseAcpxRuntimeSandboxRootClaim(sandbox),
+    );
+    if (sandboxError !== null) errors.push(sandboxError);
+  }
   return errors.length > 0
     ? new AggregateError(errors, "ACPX runtime cleanup failed")
     : null;
