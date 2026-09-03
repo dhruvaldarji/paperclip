@@ -770,13 +770,12 @@ async function withAcpxRuntimeSandboxRootGate<T>(
   const gatePath = acpxRuntimeSandboxRootGatePath(root);
   const deadline = Date.now() + ACPX_SANDBOX_ROOT_GATE_ACQUIRE_TIMEOUT_MS;
   for (;;) {
-    if (await acquireAcpxRuntimeSandboxRootGate(gatePath)) {
+    const ownContent = await acquireAcpxRuntimeSandboxRootGate(gatePath);
+    if (ownContent !== null) {
       try {
         return await criticalSection();
       } finally {
-        await unlink(gatePath).catch((error) => {
-          if (errorCode(error) !== "ENOENT") throw error;
-        });
+        await releaseAcpxRuntimeSandboxRootGate(gatePath, ownContent);
       }
     }
     // The gate is held by another admission. Break it only when that holder
@@ -792,9 +791,12 @@ async function withAcpxRuntimeSandboxRootGate<T>(
   }
 }
 
+// Returns this holder's own gate content on success, so its later release
+// can identify its own gate by content rather than by trusting `gatePath`
+// still names it (see `releaseAcpxRuntimeSandboxRootGate`).
 async function acquireAcpxRuntimeSandboxRootGate(
   gatePath: string,
-): Promise<boolean> {
+): Promise<string | null> {
   let handle: FileHandle;
   try {
     handle = await open(
@@ -806,27 +808,86 @@ async function acquireAcpxRuntimeSandboxRootGate(
       PRIVATE_FILE_MODE,
     );
   } catch (error) {
-    if (errorCode(error) === "EEXIST") return false;
+    if (errorCode(error) === "EEXIST") return null;
     throw error;
   }
+  // The holder pid, plus a random per-acquisition token so this exact gate
+  // instance can be told apart from a same-pid replacement created at the
+  // same path later. A device-and-inode check cannot do this: a delete
+  // immediately followed by a create at the same path can reuse the
+  // just-freed inode number on some filesystems (observed on ext4), so a
+  // replacement gate can carry the very same identity the deleted one had.
+  const content = `${process.pid}:${randomBytes(16).toString("hex")}`;
   try {
     await handle.chmod(PRIVATE_FILE_MODE);
-    // The holder pid, plus a random per-acquisition token so this exact
-    // gate instance can be told apart from a same-pid replacement created
-    // at the same path later. A device-and-inode check cannot do this: a
-    // delete immediately followed by a create at the same path can reuse
-    // the just-freed inode number on some filesystems (observed on ext4),
-    // so a replacement gate can carry the very same identity the deleted
-    // one had.
-    await handle.writeFile(
-      `${process.pid}:${randomBytes(16).toString("hex")}`,
-      "utf8",
-    );
+    await handle.writeFile(content, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
-  return true;
+  return content;
+}
+
+// Releases this holder's own gate. A plain unlink by pathname is usually
+// enough, but a concurrent stale-gate recovery can have captured this exact
+// gate under a private reap name for inspection (see
+// `breakStaleAcpxRuntimeSandboxRootGate`) just before this call runs,
+// leaving nothing at `gatePath` to unlink even though this holder's
+// critical section has genuinely ended. Left alone, that recovery can then
+// restore what it captured after this holder is already done, resurrecting
+// a gate nobody holds — later admissions would read its still-alive pid and
+// treat it as live indefinitely. When the plain unlink finds nothing, this
+// call instead finds and removes the capture directly, by content rather
+// than by guessing its private name, so a recovery that later tries to
+// restore it finds nothing there. A capture can also already have been
+// restored back to `gatePath` by the time this call notices the first
+// unlink failed, so this call retries the plain unlink once more after
+// clearing any capture, closing the gap in either ordering.
+async function releaseAcpxRuntimeSandboxRootGate(
+  gatePath: string,
+  ownContent: string,
+): Promise<void> {
+  const releasedDirectly = await unlink(gatePath)
+    .then(() => true)
+    .catch((error) => {
+      if (errorCode(error) === "ENOENT") return false;
+      throw error;
+    });
+  if (releasedDirectly) return;
+  await reclaimAcpxRuntimeSandboxRootGateCapture(gatePath, ownContent);
+  await unlink(gatePath).catch((error) => {
+    if (errorCode(error) !== "ENOENT") throw error;
+  });
+}
+
+// Finds and removes any reap-named capture of `gatePath` whose content
+// matches `ownContent`, so a stale-gate recovery holding that exact capture
+// cannot restore it after this holder has already moved on.
+async function reclaimAcpxRuntimeSandboxRootGateCapture(
+  gatePath: string,
+  ownContent: string,
+): Promise<void> {
+  const directory = dirname(gatePath);
+  const prefix = `${basename(gatePath)}${ACPX_SANDBOX_ROOT_GATE_REAP_INFIX}`;
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const capturePath = join(directory, entry);
+    const contents = await readFile(capturePath, "utf8").catch((error) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (contents !== ownContent) continue;
+    await unlink(capturePath).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error;
+    });
+  }
 }
 
 // Removes a gate file left behind by a holder process that no longer exists,
@@ -969,12 +1030,26 @@ async function removeStaleAcpxRuntimeSandboxRootGate(
     return;
   }
   // The rename caught a live replacement a fresh claimant put at the shared
-  // path after this call proved the original dead: put it straight back.
+  // path after this call proved the original dead: put it straight back,
+  // unless that claimant's own critical section has since ended. Restoring
+  // a gate after its holder is done would resurrect it: the holder's own
+  // release finds nothing at `gatePath` to unlink (this rename already
+  // moved it away), so it reclaims `removalPath` directly by content
+  // instead (see `releaseAcpxRuntimeSandboxRootGate`). A `link` failing
+  // with ENOENT here means that reclaim already won this race, so there is
+  // nothing left to restore.
   await dependencies.afterStaleGateCapture?.();
   try {
     await link(removalPath, gatePath);
   } catch (error) {
-    if (errorCode(error) !== "EEXIST") throw error;
+    const code = errorCode(error);
+    if (code === "ENOENT") {
+      // The claimant already finished and reclaimed its own gate out from
+      // under this capture: its critical section is over, so leaving the
+      // shared path empty is correct, not a leak.
+      return;
+    }
+    if (code !== "EEXIST") throw error;
     // A third claimant grabbed the shared path in the brief moment this
     // call's rename vacated it, before the restore could land. That
     // claimant's gate must not be clobbered, so the caught gate is left
