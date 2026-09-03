@@ -481,11 +481,7 @@ jobs:
                       probe for probe in probes if probe.lower() in message.lower()
                   ],
               }))
-              if message != "ACPX session handshake exceeded its admission deadline":
-                  raise SystemExit("descriptor-safe ACPX session.open failed")
-              print(json.dumps({
-                  "descriptorSessionOpen": "expected_dummy_credential_timeout",
-              }))
+              raise SystemExit("descriptor-safe ACPX session.open failed")
           process.stdin.close()
           process.wait(timeout=10)
           PY
