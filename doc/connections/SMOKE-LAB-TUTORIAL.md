@@ -124,7 +124,7 @@ Two things to know before you start:
 | **approve** | **Review** tab → approve the pending write. | The request clears; the call completes. |
 | **denied-call** | Set the blocked action to **Off**, then use its **Test** button on **Permissions**. | Decision **Off**; the call is refused with a reason. |
 | **schema-change / quarantine** | Trigger the fixture schema flip (HTTP paths), then **Refresh actions** on Permissions. | A **quarantine** pill with the changed entries held back. |
-| **revoke** | From **Connectors**, open the connection's management menu and choose **Remove connection** (or revoke the gateway session for P6). | Agent access is removed immediately; a revoked token is cut off (401). |
+| **revoke** | From **Connectors**, choose **Remove connection** from the connection's management menu. In the classic table, use the trash button labeled **Delete _app_ connection**. (For P6, revoke the gateway session instead.) | Agent access is removed immediately; a revoked token is cut off (401). |
 | **audit-evidence** | Open company **Audit** and choose **Apps & tools** in the Action filter. | Audit rows for the allowed, approved, denied, quarantine, and revoke decisions. |
 
 (The results matrix in §6 folds **approve** into its *Ask-first write* column, so
@@ -177,11 +177,12 @@ This is the richest path — do it by hand once and the rest are variations.
    actions** on the **Permissions** tab. **You should see:** a **quarantine**
    pill (on Review and Permissions) — the changed entries are held back until you
    explicitly turn them on.
-7. **Revoke.** Return to **Apps → Connections**, open the connection's
-   management menu, and choose **Remove connection**. **You should see:** a
-   confirmation explaining that saved credentials are deleted and agent access
-   ends immediately. Reinstall the fixture apps before continuing with another
-   path that uses this connection.
+7. **Revoke.** Return to **Apps → Connections** and choose **Remove connection**
+   from the connection's management menu. In the classic table, use the trash
+   button labeled **Delete _app_ connection**. **You should see:** a confirmation
+   explaining that saved credentials are deleted and agent access ends
+   immediately. Reinstall the fixture apps before continuing with another path
+   that uses this connection.
 8. **Audit evidence.** Open company **Audit** and choose **Apps & tools** in the
    Action filter.
    **You should see:** rows for each decision above (allowed, approved, denied,
