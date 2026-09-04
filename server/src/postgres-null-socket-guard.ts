@@ -97,9 +97,13 @@ export function handlePostgresNullSocketGuardException(error: unknown): void {
 /**
  * Registers the guard's `uncaughtException` listener, unless an operator
  * disables it with `POSTGRES_NULL_SOCKET_GUARD_ENABLED=false` (or `0`).
- * Call this once, early, from the server entry point.
+ * Call this once, early, from the server entry point. This function is
+ * idempotent: a repeat call adds no second listener, so a caller that runs
+ * many times in one process (a test suite that calls `startServer()`
+ * repeatedly) never exceeds Node's default listener-count warning.
  */
 export function registerPostgresNullSocketGuard(env: NodeJS.ProcessEnv = process.env): void {
   if (!isGuardEnabled(env)) return;
+  if (process.listeners("uncaughtException").includes(handlePostgresNullSocketGuardException)) return;
   process.on("uncaughtException", handlePostgresNullSocketGuardException);
 }

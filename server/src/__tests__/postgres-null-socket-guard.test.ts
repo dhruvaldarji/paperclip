@@ -152,6 +152,13 @@ describe("registerPostgresNullSocketGuard", () => {
     registerPostgresNullSocketGuard({ POSTGRES_NULL_SOCKET_GUARD_ENABLED: "false" });
     expect(process.listenerCount("uncaughtException")).toBe(before);
   });
+
+  it("adds one listener however many times it runs", () => {
+    const before = process.listenerCount("uncaughtException");
+    registerPostgresNullSocketGuard({});
+    registerPostgresNullSocketGuard({});
+    expect(process.listenerCount("uncaughtException")).toBe(before + 1);
+  });
 });
 
 describe("handlePostgresNullSocketGuardException", () => {
@@ -257,10 +264,16 @@ describe("the driver crash sequence, reproduced against a fake wire server", () 
     expect(result.code).toBe(0);
   }, 20_000);
 
-  it("a non-matching uncaught exception still ends the process", async () => {
+  it("a non-matching uncaught exception still ends the process and reports its cause", async () => {
     const result = await runFixture("unrelated-crash");
 
     expect(messageTypes(result)).not.toContain("unexpected-survival");
     expect(result.code).toBe(1);
+    // The logger writes the fatal record to standard output; Node's own
+    // default handler would have used standard error, but the guard
+    // replaces that handler for every uncaught exception, so this is the
+    // only place the message and the stack can appear.
+    expect(result.stdout).toContain("an unrelated failure the guard must not swallow");
+    expect(result.stdout).toContain("at Immediate");
   }, 20_000);
 });
