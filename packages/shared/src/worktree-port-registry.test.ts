@@ -24,13 +24,20 @@ function makeTemporaryRoot(): string {
 // main thread, because the code under test blocks the calling thread
 // (Atomics.wait) while it waits for a probe answer; a same-thread server
 // could never respond to its own blocked caller.
+// The worker posts an "owned" message back to the main thread each time it
+// answers a probe with "owned". The test waits on that message instead of a
+// fixed delay, so the assertion that follows only runs after the probe has
+// actually answered at least one ownership check, not merely after some
+// wall-clock time.
 const FAKE_OWNERSHIP_PROBE_SOURCE = `
 const net = require("node:net");
 const { parentPort, workerData } = require("node:worker_threads");
 const control = new Int32Array(workerData.control);
 const server = net.createServer((socket) => {
   socket.once("data", (candidate) => {
-    socket.end(candidate.toString("utf8") === workerData.token ? "owned" : "denied");
+    const answer = candidate.toString("utf8") === workerData.token ? "owned" : "denied";
+    if (answer === "owned") parentPort.postMessage("owned");
+    socket.end(answer);
   });
 });
 server.once("error", () => {
@@ -48,7 +55,11 @@ parentPort.once("message", () => {
 });
 `;
 
-function startFakeOwnershipProbe(token: string): { port: number; close: () => Promise<void> } {
+function startFakeOwnershipProbe(token: string): {
+  port: number;
+  waitForOwnedResponse: (timeoutMs?: number) => Promise<void>;
+  close: () => Promise<void>;
+} {
   const control = new Int32Array(new SharedArrayBuffer(8));
   const worker = new Worker(FAKE_OWNERSHIP_PROBE_SOURCE, {
     eval: true,
@@ -61,8 +72,32 @@ function startFakeOwnershipProbe(token: string): { port: number; close: () => Pr
     void worker.terminate();
     throw new Error("The fake ownership probe failed to start.");
   }
+
+  let ownedResponseSeen = false;
+  const ownedWaiters: Array<() => void> = [];
+  worker.on("message", (message: unknown) => {
+    if (message !== "owned") return;
+    ownedResponseSeen = true;
+    for (const resolveWaiter of ownedWaiters.splice(0)) resolveWaiter();
+  });
+
   return {
     port,
+    // Resolves once the probe has answered "owned" at least once. Falls
+    // straight through when that has already happened, and otherwise waits
+    // for the worker's next "owned" message.
+    waitForOwnedResponse: (timeoutMs = 5_000): Promise<void> => {
+      if (ownedResponseSeen) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error("Timed out waiting for the fake ownership probe to answer \"owned\"."));
+        }, timeoutMs);
+        ownedWaiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    },
     close: () => new Promise<void>((resolve) => {
       worker.once("exit", () => resolve());
       worker.postMessage("stop");
@@ -121,12 +156,12 @@ describe("worktree port registry lock", () => {
       second = withWorktreePortRegistryLock(homeDir, async () => {
         secondEntered = true;
       });
-      // The lock never looks fresh (nothing refreshes its mtime), so every
-      // retry re-probes the owner, each probe launching its own worker
-      // thread. A long wait here invites many retries and stacks up worker
-      // launches for no added signal; one retry cycle is already enough to
-      // show the lock is not reclaimed while the probe answers.
-      await delay(30);
+      // Wait for the fake probe to actually answer "owned" before checking
+      // secondEntered. A fixed delay can fire before the probe worker gets
+      // scheduled under processor contention, letting the assertion below
+      // pass without proving the reclaim was blocked by a real "owned"
+      // answer.
+      await probe.waitForOwnedResponse();
 
       expect(secondEntered).toBe(false);
 
