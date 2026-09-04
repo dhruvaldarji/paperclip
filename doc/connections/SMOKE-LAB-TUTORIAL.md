@@ -102,7 +102,7 @@ the URL bar, e.g. `PAP`). Replace it in the example paths.
 
 Each path P1–P7 walks the same governed lifecycle. You drive it from a fixture
 connection's pages — a small left-hand menu inside the app with **Setup**,
-**Review**, **Permissions**, **Activity**, **Test**, and **Advanced**
+**Permissions**, and **Review** (plus **Services** for broker connections)
 (`/{PREFIX}/apps/{connectionId}/{tab}`).
 
 Two things to know before you start:
@@ -110,23 +110,23 @@ Two things to know before you start:
 - **Actions are listed by their display title**, with the raw tool name behind
   them — e.g. `todo.list` renders as **List synthetic todos**. The table below
   gives both.
-- **"Policies" are the per-action dropdowns on the Permissions tab.** Each action
-  is **Off**, **Allowed**, or **Ask a human first**. When a step below says "with
-  a require-approval policy in force", that means: set that action's dropdown to
-  **Ask a human first**. "Block policy" means set it to **Off**. Fresh installs
-  start conservative, so check the dropdown before running a step.
+- **"Policies" are the three-way per-action toggles on the Permissions tab.**
+  Each action is **Off**, **Ask first**, or **Allowed**. When a step below says
+  "with a require-approval policy in force", set that action to **Ask first**.
+  "Block policy" means set it to **Off**. New connections start Allowed; narrow
+  an action before testing when the scenario requires another decision.
 
 | Step | What you do | What you should see |
 |---|---|---|
 | **connect** | Open the fixture connection (for P1, complete the fake OAuth consent). | Connection shows **Connected**, with the action count. |
 | **discover-catalog** | Open **Permissions**. | The action list includes the path's tools (e.g. **List synthetic todos**). |
-| **allowed-read** | Set the read action to **Allowed**, then run it from the **Test** tab. | Decision badge **Allowed**; the call returns without error. |
-| **ask-first-write** | Set the write action to **Ask a human first**, then run it from **Test**. | Decision **Ask first**; a pending request appears in **Review**. |
+| **allowed-read** | Set the read action to **Allowed**, then use its **Test** button on **Permissions**. | Decision badge **Allowed**; the call returns without error. |
+| **ask-first-write** | Set the write action to **Ask first**, then use its **Test** button. | Decision **Ask first**; a pending request appears in **Review**. |
 | **approve** | **Review** tab → approve the pending write. | The request clears; the call completes. |
-| **denied-call** | Set the blocked action to **Off**, then run it from **Test**. | Decision **Off**; the call is refused with a reason. |
+| **denied-call** | Set the blocked action to **Off**, then use its **Test** button on **Permissions**. | Decision **Off**; the call is refused with a reason. |
 | **schema-change / quarantine** | Trigger the fixture schema flip (HTTP paths), then **Refresh actions** on Permissions. | A **quarantine** pill with the changed entries held back. |
 | **revoke** | **Setup** → turn off the **"Agents can use this app"** toggle (or revoke the gateway session for P6). | The connection is paused; a revoked token is cut off (401). |
-| **audit-evidence** | **Activity** tab. | Audit rows for the allowed, approved, denied, quarantine, and revoke decisions. |
+| **audit-evidence** | Open company **Activity** and choose **Apps & tools**. | Audit rows for the allowed, approved, denied, quarantine, and revoke decisions. |
 
 (The results matrix in §6 folds **approve** into its *Ask-first write* column, so
 the matrix shows 8 columns for these 9 steps.)
@@ -162,19 +162,18 @@ This is the richest path — do it by hand once and the rest are variations.
      Smoke OAuth**. Wrong credentials are rejected with a `403`.
 2. **Discover the catalog.** Open **Permissions** and confirm **List synthetic
    todos** (`todo.list`) and **Add synthetic todo** (`todo.add`) appear under
-   *Action permissions*.
+   *Actions*.
 3. **Allowed read.** Make sure **List synthetic todos** is set to **Allowed** in
-   Permissions. Then on the **Test** tab, pick an agent in the **Test as** picker
-   and run **List synthetic todos**. **You should see:** an **Allowed** badge and
-   a result with no error.
+   Permissions. Click its **Test** button, pick an agent in the **Act as** picker,
+   and run it. **You should see:** an **Allowed** badge and a result with no error.
 4. **Ask-first write → approve.** In Permissions, set **Add synthetic todo** to
-   **Ask a human first**. Run it from the **Test** tab. **You should see:** an
+   **Ask first**. Click its **Test** button and run it. **You should see:** an
    **Ask first** badge and a **pending** request. Switch to the **Review** tab
    (its idle state says "Nothing is waiting for your OK right now") and
    **approve** it. **You should see:** the request clears and the write completes.
 5. **Denied call.** In Permissions, set **Send outbox email** (`email.send`) to
-   **Off**, then run it from **Test**. **You should see:** an **Off** badge and a
-   refusal carrying a reason code.
+   **Off**, then click its **Test** button. **You should see:** an **Off** badge
+   and a refusal carrying a reason code.
 6. **Schema change → quarantine.** Run **Fixture schema mutation**
    (`fixture.schemaFlip`) — it changes a tool's schema — then click **Refresh
    actions** on the **Permissions** tab. **You should see:** a **quarantine**
@@ -183,8 +182,9 @@ This is the richest path — do it by hand once and the rest are variations.
 7. **Revoke.** On **Setup**, turn off the **"Agents can use this app"** toggle.
    **You should see:** the app is paused for every agent. (Turn it back on to
    continue.)
-8. **Audit evidence.** **Activity** tab. **You should see:** rows for each decision
-   above (allowed, approved, denied, quarantine, revoke).
+8. **Audit evidence.** Open company **Activity** and choose **Apps & tools**.
+   **You should see:** rows for each decision above (allowed, approved, denied,
+   quarantine, revoke).
 
 > Prefer not to click all seven by hand? Use the automated browser smoke — §7 —
 > which performs exactly these steps and leaves you screenshots to read, including

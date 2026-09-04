@@ -238,12 +238,12 @@ export function resolveConnectionMethodServerUrl(
 }
 
 export function recommendedDefaultsForApp(app: AppDefinition, methodKey?: string | null): Record<string, unknown> {
-  const normalizedMethodKey = app.slug === "gmail" && methodKey === "paperclip-id-oauth" ? "paperclip-draft" : methodKey;
-  const method = normalizedMethodKey
-    ? app.methods.find((candidate) => candidate.key === normalizedMethodKey) ?? null
-    : getAvailableConnectionMethod(app, null);
+  // Keep the parameters in the public contract: callers resolve defaults for a
+  // concrete app/method even though the initial policy is now uniform.
+  void app;
+  void methodKey;
   return {
     access: "all_agents",
-    askFirstRiskLevels: method && method.riskTier !== "S1" ? ["write", "destructive"] : [],
+    askFirstRiskLevels: [],
   };
 }
