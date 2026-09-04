@@ -180,6 +180,7 @@ import {
 import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
+import { emitAgentTaskRun } from "./agent-task-run-telemetry.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService, type MissingRuntimeBinding } from "./secrets.js";
@@ -10703,6 +10704,7 @@ export function heartbeatService(
     if (updated) {
       if (isHeartbeatRunTerminalStatus(updated.status)) {
         clearHeartbeatRunRuntimeStatus(updated.id);
+        await emitAgentTaskRun(db, updated);
       }
       publishLiveEvent({
         companyId: updated.companyId,
@@ -10749,6 +10751,7 @@ export function heartbeatService(
     if (updated) {
       if (isHeartbeatRunTerminalStatus(updated.status)) {
         clearHeartbeatRunRuntimeStatus(updated.id);
+        await emitAgentTaskRun(db, updated);
       }
       publishLiveEvent({
         companyId: updated.companyId,
@@ -13260,6 +13263,8 @@ export function heartbeatService(
 
     if (!cancelled) return null;
 
+    await emitAgentTaskRun(db, cancelled);
+
     if (cancelled.wakeupRequestId) {
       await db
         .update(agentWakeupRequests)
@@ -15361,6 +15366,7 @@ export function heartbeatService(
         },
       });
       publishRunLifecyclePluginEvent(queuedCommentClaim.run);
+      await emitAgentTaskRun(db, queuedCommentClaim.run);
       return null;
     }
     const claimed = queuedCommentClaim
