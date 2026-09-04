@@ -106,7 +106,7 @@ echo "$ARM_A_OUTPUT"
 echo "Arm A exit status: $ARM_A_STATUS"
 
 set +e
-ARM_B_OUTPUT="$(run_arm B env 2>&1)"
+ARM_B_OUTPUT="$(run_arm B env -u CARGO_NET_RETRY -u CARGO_HTTP_TIMEOUT 2>&1)"
 ARM_B_STATUS=$?
 set -e
 echo "$ARM_B_OUTPUT"

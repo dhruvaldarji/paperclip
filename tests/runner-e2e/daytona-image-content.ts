@@ -14,6 +14,7 @@ export const DAYTONA_IMAGE_DOCKERFILE_PATH = "docker/daytona-runner/Dockerfile";
 // Keep it conservative: a false positive only rebuilds the image, while a
 // missing input could incorrectly reuse an incompatible paid-test image.
 export const DAYTONA_IMAGE_INPUT_PATHS = [
+  ".cargo",
   ".dockerignore",
   ".npmrc",
   "docker/daytona-runner/Dockerfile",
