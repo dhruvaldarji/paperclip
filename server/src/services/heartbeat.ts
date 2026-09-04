@@ -23455,6 +23455,8 @@ export function heartbeatService(
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
+      const cancelledRunsToEmit: (typeof heartbeatRuns.$inferSelect)[] = [];
+
       const outcome = await db.transaction(async (tx) => {
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
@@ -23658,6 +23660,8 @@ export function heartbeatService(
             .set({ nextEventSeq: eventSeq + 1, updatedAt: now })
             .where(eq(heartbeatRuns.id, cancelled.id));
 
+          cancelledRunsToEmit.push(cancelled);
+
           return true;
         };
 
@@ -23722,8 +23726,9 @@ export function heartbeatService(
                 eq(heartbeatRuns.status, activeExecutionRun.status),
               ),
             )
-            .returning({ id: heartbeatRuns.id });
+            .returning();
           if (cancelled.length > 0) {
+            cancelledRunsToEmit.push(cancelled[0]);
             if (activeExecutionRun.wakeupRequestId) {
               await tx
                 .update(agentWakeupRequests)
@@ -24352,6 +24357,10 @@ export function heartbeatService(
 
         return { kind: "queued" as const, run: newRun };
       });
+
+      for (const cancelledRun of cancelledRunsToEmit) {
+        await emitAgentTaskRun(db, cancelledRun);
+      }
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped")
         return null;
