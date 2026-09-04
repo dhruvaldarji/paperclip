@@ -2070,6 +2070,43 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       await act(async () => root.unmount());
     });
 
+    it("submits the browser code on the paste, not on the first keystroke", async () => {
+      mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "absent" });
+      const { root } = await openStep4({ adapterType: "claude_local" });
+      await pressArcPrimary();
+
+      const field = document.body.querySelector(
+        'input[aria-label="Authorization code"]',
+      ) as HTMLInputElement | null;
+      expect(field, "the Claude card should offer a code field").toBeTruthy();
+
+      // The trap this pins. `isValidBrowserCode` reads like a completeness
+      // check and is not one — it accepts any printable ASCII from a single
+      // character up — so an auto-submit keyed off the value fires here, on the
+      // first character of anyone typing the code rather than pasting it, and
+      // clears the field they are typing into.
+      await act(async () => {
+        setControlledValue(field!, "Q");
+      });
+      for (let i = 0; i < 4; i++) await flushReact();
+      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).not.toHaveBeenCalled();
+
+      // The paste is the answer, so it goes without a press. Order matches a
+      // real paste: the event lands before the value changes.
+      await act(async () => {
+        field!.dispatchEvent(new Event("paste", { bubbles: true }));
+        setControlledValue(field!, "Q2RJ-E1YIF-authorization-code");
+      });
+      for (let i = 0; i < 4; i++) await flushReact();
+      expect(mockAgentsApi.submitClaudeSetupTokenBrowserCode).toHaveBeenCalledWith(
+        "company-new",
+        "claude-session-1",
+        "Q2RJ-E1YIF-authorization-code",
+      );
+
+      await act(async () => root.unmount());
+    });
+
     it("starts the codex_local sign-in on Connect when the signal cannot decide", async () => {
       mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
       const { root } = await openStep4({ adapterType: "codex_local" });

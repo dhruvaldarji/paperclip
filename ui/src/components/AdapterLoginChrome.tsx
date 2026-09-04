@@ -204,21 +204,28 @@ export function OnboardingLoginCodeRow({ code }: { code: string }) {
 /**
  * The field the browser code is pasted back into.
  *
- * No Submit button beside it. The code is a fixed shape, so the moment what is
- * in the field is a whole one there is nothing left to confirm — asking for a
- * press as well only adds a step that can be missed. The caller decides when
- * that is (see `autoSubmit` on the panel); this component only reports changes
- * and keeps Enter working for anyone who reaches for it.
+ * No Submit button beside it: the code arrives in one piece, off the clipboard,
+ * so the paste is the answer and a press after it confirms nothing the paste
+ * did not already say.
+ *
+ * `onPaste` is what the caller submits on, and it is separate from `onChange`
+ * on purpose. There is no shape that says "this code is complete" —
+ * `isValidBrowserCode` accepts any run of printable ASCII from one character up,
+ * deliberately, because the provider's exact format is not pinned down — so a
+ * submit driven by the value alone fires on the first keystroke of anyone who
+ * types instead of pasting. Enter stays for them.
  */
 export function OnboardingLoginCodeInput({
   value,
   onChange,
   onSubmit,
+  onPaste,
   disabled,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  onPaste?: () => void;
   disabled?: boolean;
 }) {
   return (
@@ -231,6 +238,7 @@ export function OnboardingLoginCodeInput({
       value={value}
       disabled={disabled}
       onChange={(event) => onChange(event.target.value)}
+      onPaste={() => onPaste?.()}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.preventDefault();

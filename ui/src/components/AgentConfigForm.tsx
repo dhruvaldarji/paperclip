@@ -2682,29 +2682,37 @@ function SubmittedBrowserCodeLoginPanel({
   }, [autoStart]);
 
   /**
-   * Submit as soon as what is in the field is a whole code.
+   * Submit the pasted code without a press.
    *
    * Only in the onboarding chrome, and only here: this is the login where the
-   * code is pasted *back*, so the paste is the answer and a Submit press after
-   * it confirms nothing the paste did not already say. The displayed-code login
-   * has no field to watch.
+   * code comes *back* off the clipboard, so the paste is the answer and a
+   * Submit button after it adds a step that can be missed. The displayed-code
+   * login has no field to watch.
    *
-   * `isValidBrowserCode` is the shape check the Submit button already gated on,
-   * so this fires on exactly the input that button would have accepted — a
-   * half-typed code never reaches the server, and a bad paste is rejected
-   * before the round trip rather than by it.
+   * Driven by the paste rather than by the value, which is the part that is
+   * easy to get wrong. `isValidBrowserCode` looks like a completeness check and
+   * is not one: it accepts any run of printable ASCII from a single character
+   * up, deliberately, because the provider's exact format has never been
+   * pinned down. Keying the submit off the value therefore fires on the first
+   * keystroke of anyone who types the code instead of pasting it — submitting
+   * one character, failing, and clearing the field they were typing into.
    *
-   * `submitCode.isPending` is inside `canSubmit`, and `handleSubmit` clears the
-   * field, so the effect cannot resubmit the same code: the next run sees an
-   * empty field and stops at the shape check.
+   * So the paste arms it and the shape check still gates it, which leaves
+   * typing to Enter. A paste that is not usable simply sits in the field.
+   *
+   * `submitCode.isPending` is inside `canSubmit` and `handleSubmit` clears the
+   * field, so one paste can only submit once.
    */
   const handleSubmitRef = useRef(handleSubmit);
   handleSubmitRef.current = handleSubmit;
   const autoSubmit = chrome === "onboarding";
+  const pastedRef = useRef(false);
   useEffect(() => {
-    if (!autoSubmit || !canSubmit) return;
+    if (!autoSubmit || !pastedRef.current) return;
+    pastedRef.current = false;
+    if (!canSubmit) return;
     handleSubmitRef.current();
-  }, [autoSubmit, canSubmit]);
+  }, [autoSubmit, canSubmit, browserCode]);
 
   // Report success upward once. The `stored` state is the only success state,
   // which is why this watches `isStored` and not the `authenticated` status the
@@ -2765,6 +2773,9 @@ function SubmittedBrowserCodeLoginPanel({
               value={browserCode}
               onChange={setBrowserCode}
               onSubmit={handleSubmit}
+              onPaste={() => {
+                pastedRef.current = true;
+              }}
               disabled={submitCode.isPending || isCompleting}
             />
           </>
