@@ -158,6 +158,18 @@ test("ignores an expect.poll( written inside a template literal", () => {
   assert.deepEqual(findBareRealProcessWaits(source), []);
 });
 
+test("rejects a vi.waitFor( written inside a template literal interpolation", () => {
+  const source = [
+    "async function example() {",
+    "  const message = `status: ${await vi.waitFor(() => expect(x).toBe(1))}`;",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), [
+    { line: 2, pattern: "vi.waitFor(" },
+  ]);
+});
+
 test("still flags a real bare vi.waitFor( on the line after a comment mentioning the pattern", () => {
   const source = [
     "async function example() {",

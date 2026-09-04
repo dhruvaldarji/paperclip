@@ -48,19 +48,23 @@ async function collectSourceFiles(target) {
   return files;
 }
 
-// Replace every comment and every string- or template-literal body with
-// spaces, one for one, so the result keeps the same length and the same
-// line breaks as `source`. A line count taken from the result still lines
-// up with `source`, and neither a wait-call pattern nor a `timeout` option
-// written inside a comment or a literal can survive into the result.
-function maskCommentsAndStrings(source) {
-  const masked = source.split("");
-  let index = 0;
-  while (index < source.length) {
+// Scan `source` from `start` up to `end` as executable code, writing spaces
+// into `masked` for each comment and each string- or template-literal quote
+// character it finds, then handing the literal body to `maskLiteralBody`.
+// Every other character stays as it is in `source`, so a wait-call pattern
+// written as real code — including inside a template's `${...}`
+// expression — still matches once masking is done. When `stopAtOwnCloseBrace`
+// is true, `start` points just past a `${` this function did not consume,
+// and the function tracks nested `{`/`}` pairs so it returns right after the
+// `}` that closes this same interpolation, leaving both braces unmasked.
+function maskCode(source, masked, start, end, stopAtOwnCloseBrace) {
+  let index = start;
+  let braceDepth = stopAtOwnCloseBrace ? 1 : 0;
+  while (index < end) {
     const twoCharacters = source.slice(index, index + 2);
     const character = source[index];
     if (twoCharacters === "//") {
-      while (index < source.length && source[index] !== "\n") {
+      while (index < end && source[index] !== "\n") {
         masked[index] = " ";
         index += 1;
       }
@@ -70,40 +74,88 @@ function maskCommentsAndStrings(source) {
       masked[index] = " ";
       masked[index + 1] = " ";
       index += 2;
-      while (index < source.length && source.slice(index, index + 2) !== "*/") {
+      while (index < end && source.slice(index, index + 2) !== "*/") {
         if (source[index] !== "\n") masked[index] = " ";
         index += 1;
       }
-      if (index < source.length) {
+      if (index < end) {
         masked[index] = " ";
         masked[index + 1] = " ";
         index += 2;
       }
       continue;
     }
-    if (character === "'" || character === '"' || character === "`") {
-      const quote = character;
+    if (character === "'" || character === '"') {
       masked[index] = " ";
+      index = maskLiteralBody(source, masked, index + 1, end, character, false);
+      continue;
+    }
+    if (character === "`") {
+      masked[index] = " ";
+      index = maskLiteralBody(source, masked, index + 1, end, character, true);
+      continue;
+    }
+    if (stopAtOwnCloseBrace && character === "{") {
+      braceDepth += 1;
       index += 1;
-      while (index < source.length && source[index] !== quote) {
-        if (source[index] === "\\" && index + 1 < source.length) {
-          masked[index] = " ";
-          index += 1;
-          if (source[index] !== "\n") masked[index] = " ";
-          index += 1;
-          continue;
-        }
-        if (source[index] !== "\n") masked[index] = " ";
-        index += 1;
-      }
-      if (index < source.length) {
-        masked[index] = " ";
-        index += 1;
-      }
+      continue;
+    }
+    if (stopAtOwnCloseBrace && character === "}") {
+      braceDepth -= 1;
+      index += 1;
+      if (braceDepth === 0) return index;
       continue;
     }
     index += 1;
   }
+  return index;
+}
+
+// Mask a `'`/`"` string body, or the literal-text runs of a backtick
+// template, with spaces up to and including the matching `quote`. This
+// keeps `masked` the same length and the same line breaks as `source`, so a
+// pattern written as plain text inside the literal can never survive into
+// the result. For a template literal (`isTemplate` is true), a `${` inside
+// the body hands control to `maskCode` instead, so the interpolation is
+// scanned as executable code, not masked as text; masking of literal text
+// resumes on the matching `}` that `maskCode` returns.
+function maskLiteralBody(source, masked, start, end, quote, isTemplate) {
+  let index = start;
+  while (index < end) {
+    const character = source[index];
+    if (character === quote) {
+      masked[index] = " ";
+      return index + 1;
+    }
+    if (character === "\\" && index + 1 < end) {
+      masked[index] = " ";
+      index += 1;
+      if (source[index] !== "\n") masked[index] = " ";
+      index += 1;
+      continue;
+    }
+    if (isTemplate && character === "$" && source[index + 1] === "{") {
+      index += 2;
+      index = maskCode(source, masked, index, end, true);
+      continue;
+    }
+    if (character !== "\n") masked[index] = " ";
+    index += 1;
+  }
+  return index;
+}
+
+// Replace every comment and every string- or template-literal body with
+// spaces, one for one, so the result keeps the same length and the same
+// line breaks as `source`. A line count taken from the result still lines
+// up with `source`, and neither a wait-call pattern nor a `timeout` option
+// written inside a comment or plain literal text can survive into the
+// result. A wait-call pattern written inside a template's `${...}`
+// expression is executable code, so it survives masking and is still
+// scanned, the same as a call written outside any literal.
+function maskCommentsAndStrings(source) {
+  const masked = source.split("");
+  maskCode(source, masked, 0, source.length, false);
   return masked.join("");
 }
 
