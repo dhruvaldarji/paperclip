@@ -48,59 +48,149 @@ async function collectSourceFiles(target) {
   return files;
 }
 
-// Find the index of the close paren that matches the open paren at
-// `openParenIndex`, tracking nested `()`, `{}`, and `[]`, and skipping over
-// string and template literals so a brace or paren inside one never throws
-// off the count.
-function findMatchingCloseParenIndex(source, openParenIndex) {
-  let depth = 0;
-  for (let index = openParenIndex; index < source.length; index += 1) {
+// Replace every comment and every string- or template-literal body with
+// spaces, one for one, so the result keeps the same length and the same
+// line breaks as `source`. A line count taken from the result still lines
+// up with `source`, and neither a wait-call pattern nor a `timeout` option
+// written inside a comment or a literal can survive into the result.
+function maskCommentsAndStrings(source) {
+  const masked = source.split("");
+  let index = 0;
+  while (index < source.length) {
+    const twoCharacters = source.slice(index, index + 2);
     const character = source[index];
+    if (twoCharacters === "//") {
+      while (index < source.length && source[index] !== "\n") {
+        masked[index] = " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (twoCharacters === "/*") {
+      masked[index] = " ";
+      masked[index + 1] = " ";
+      index += 2;
+      while (index < source.length && source.slice(index, index + 2) !== "*/") {
+        if (source[index] !== "\n") masked[index] = " ";
+        index += 1;
+      }
+      if (index < source.length) {
+        masked[index] = " ";
+        masked[index + 1] = " ";
+        index += 2;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      const quote = character;
+      masked[index] = " ";
+      index += 1;
+      while (index < source.length && source[index] !== quote) {
+        if (source[index] === "\\" && index + 1 < source.length) {
+          masked[index] = " ";
+          index += 1;
+          if (source[index] !== "\n") masked[index] = " ";
+          index += 1;
+          continue;
+        }
+        if (source[index] !== "\n") masked[index] = " ";
+        index += 1;
+      }
+      if (index < source.length) {
+        masked[index] = " ";
+        index += 1;
+      }
+      continue;
+    }
+    index += 1;
+  }
+  return masked.join("");
+}
+
+// Find the index of the close paren that matches the open paren at
+// `openParenIndex`, tracking nested `()`, `{}`, and `[]`. Callers pass a
+// comment- and string-masked source, so a stray bracket inside a comment or
+// a literal never throws off the count.
+function findMatchingCloseParenIndex(maskedSource, openParenIndex) {
+  let depth = 0;
+  for (let index = openParenIndex; index < maskedSource.length; index += 1) {
+    const character = maskedSource[index];
     if (character === "(" || character === "{" || character === "[") {
       depth += 1;
     } else if (character === ")" || character === "}" || character === "]") {
       depth -= 1;
       if (depth === 0) return index;
-    } else if (character === "'" || character === '"' || character === "`") {
-      const quote = character;
-      index += 1;
-      while (index < source.length && source[index] !== quote) {
-        if (source[index] === "\\") index += 1;
-        index += 1;
-      }
     }
   }
-  return source.length;
+  return maskedSource.length;
+}
+
+// Split a call's argument-list text on its top-level commas, so a comma
+// nested inside a callback body, an object, or an array does not split a
+// single argument in two.
+function splitTopLevelArguments(maskedCallArguments) {
+  const args = [];
+  let depth = 0;
+  let current = "";
+  for (const character of maskedCallArguments) {
+    if (character === "(" || character === "{" || character === "[") {
+      depth += 1;
+      current += character;
+    } else if (character === ")" || character === "}" || character === "]") {
+      depth -= 1;
+      current += character;
+    } else if (character === "," && depth === 0) {
+      args.push(current);
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  args.push(current);
+  return args;
+}
+
+// Return the wait call's own options argument (`vi.waitFor(callback,
+// options)` or `expect.poll(callback, options)`), or `null` when the call
+// passes no second argument. Only this text, not the callback body, states
+// the call's own timeout.
+function findOptionsArgument(maskedSource, openParenIndex, closeParenIndex) {
+  const callArguments = maskedSource.slice(openParenIndex + 1, closeParenIndex);
+  const topLevelArguments = splitTopLevelArguments(callArguments);
+  return topLevelArguments.length >= 2 ? topLevelArguments[1] : null;
 }
 
 /**
  * Find each real-process-shaped wait call (`vi.waitFor(`, or `expect.poll(`,
  * including the two-line `expect\n  .poll(` form) in `source` that has
  * neither an `IN_PROCESS_WAIT_MARKER` note on the line directly above it
- * nor an explicit `timeout` option in its own argument list. A call site
+ * nor an explicit `timeout` option in its own options argument. A call site
  * with the marker declares, in place, that it settles fully in-process. A
  * call site with an explicit `timeout` option already states its own
- * envelope. Either one needs no real-process deadline.
+ * envelope. Either one needs no real-process deadline. A pattern written
+ * inside a comment or inside a string or template literal is source text,
+ * not a call, and never counts as one.
  */
 export function findBareRealProcessWaits(source) {
   const lines = source.split("\n");
+  const masked = maskCommentsAndStrings(source);
   const found = [];
   for (const { name, regex } of BARE_WAIT_PATTERNS) {
     regex.lastIndex = 0;
     for (
-      let match = regex.exec(source);
+      let match = regex.exec(masked);
       match !== null;
-      match = regex.exec(source)
+      match = regex.exec(masked)
     ) {
-      const line = source.slice(0, match.index).split("\n").length;
+      const line = masked.slice(0, match.index).split("\n").length;
       const precedingLine = lines[line - 2] ?? "";
       if (precedingLine.includes(IN_PROCESS_WAIT_MARKER)) {
         continue;
       }
       const openParenIndex = match.index + match[0].length - 1;
-      const closeParenIndex = findMatchingCloseParenIndex(source, openParenIndex);
-      const callArguments = source.slice(openParenIndex + 1, closeParenIndex);
-      if (EXPLICIT_TIMEOUT_PATTERN.test(callArguments)) {
+      const closeParenIndex = findMatchingCloseParenIndex(masked, openParenIndex);
+      const optionsArgument = findOptionsArgument(masked, openParenIndex, closeParenIndex);
+      if (optionsArgument !== null && EXPLICIT_TIMEOUT_PATTERN.test(optionsArgument)) {
         continue;
       }
       found.push({ line, pattern: name });

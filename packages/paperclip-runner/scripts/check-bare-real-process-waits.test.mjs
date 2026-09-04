@@ -90,3 +90,83 @@ test("allows an expect.poll( that passes an explicit timeout option", () => {
 
   assert.deepEqual(findBareRealProcessWaits(source), []);
 });
+
+test("rejects a vi.waitFor( whose callback body passes an unrelated timeout option", () => {
+  const source = [
+    "async function example() {",
+    "  await vi.waitFor(() => invoke({ timeout: 500 }));",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), [
+    { line: 2, pattern: "vi.waitFor(" },
+  ]);
+});
+
+test("allows a vi.waitFor( whose own second argument passes a timeout option, even with a same-shaped callback option", () => {
+  const source = [
+    "async function example() {",
+    "  await vi.waitFor(() => invoke({ timeout: 500 }), { timeout: 10_000 });",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), []);
+});
+
+test("ignores a vi.waitFor( written inside a line comment", () => {
+  const source = [
+    "async function example() {",
+    "  // do not call vi.waitFor( here, it is not spawned-process bound",
+    "  await Promise.resolve();",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), []);
+});
+
+test("ignores an expect.poll( written inside a block comment", () => {
+  const source = [
+    "async function example() {",
+    "  /* legacy note: this used to call",
+    "     expect.poll( on the old transport */",
+    "  await Promise.resolve();",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), []);
+});
+
+test("ignores a vi.waitFor( written inside a string literal", () => {
+  const source = [
+    "async function example() {",
+    '  const message = "replace this call with vi.waitFor( for a live wait";',
+    "  await Promise.resolve();",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), []);
+});
+
+test("ignores an expect.poll( written inside a template literal", () => {
+  const source = [
+    "async function example() {",
+    "  const message = `see expect.poll( for the retry loop`;",
+    "  await Promise.resolve();",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), []);
+});
+
+test("still flags a real bare vi.waitFor( on the line after a comment mentioning the pattern", () => {
+  const source = [
+    "async function example() {",
+    "  // vi.waitFor( is normally the wrong tool here, but this one needs it:",
+    "  await vi.waitFor(() => expect(x).toBe(1));",
+    "}",
+  ].join("\n");
+
+  assert.deepEqual(findBareRealProcessWaits(source), [
+    { line: 3, pattern: "vi.waitFor(" },
+  ]);
+});

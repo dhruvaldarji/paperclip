@@ -28,10 +28,59 @@
 // and for this helper's own 50ms poll granularity.
 export const CAPABILITY_LIVE_PROCESS_WAIT_DEADLINE_MS = 10_000;
 
+// A sentinel error thrown when a single attempt runs past the wait's
+// remaining deadline. It never leaves `raceAttemptAgainstDeadline` to a
+// caller other than `waitForCapabilityLiveProcess`, so a plain class with no
+// message is enough to tell it apart from a real attempt failure.
+class CapabilityLiveProcessAttemptTimeout extends Error {}
+
+// Run one attempt of `callback` against a deadline of `remainingMs`. A
+// pending attempt does not stop when the deadline wins the race, so this
+// attaches a no-op rejection handler to the attempt promise. Without that
+// handler, an attempt that rejects after its own race has already lost would
+// surface as an unhandled rejection instead of the deadline error below.
+async function raceAttemptAgainstDeadline<T>(
+  callback: () => T | Promise<T>,
+  remainingMs: number,
+): Promise<T> {
+  const attempt = Promise.resolve().then(callback);
+  attempt.catch(() => {});
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new CapabilityLiveProcessAttemptTimeout()),
+      remainingMs,
+    );
+  });
+  try {
+    return await Promise.race([attempt, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function buildDeadlineExceededError(
+  label: string,
+  elapsedMs: number,
+  lastError: unknown,
+): Error {
+  const detail =
+    lastError instanceof Error
+      ? (lastError.stack ?? lastError.message)
+      : String(lastError);
+  return new Error(
+    `Wait for "${label}" did not settle within ${CAPABILITY_LIVE_PROCESS_WAIT_DEADLINE_MS}ms ` +
+      `(observed ${elapsedMs}ms). Last observed error: ${detail}`,
+    { cause: lastError },
+  );
+}
+
 /**
  * Poll a capability-live operation that settles only after a real spawned
  * operating-system process does work. Use a deadline derived from the real
- * process envelope described above. Unlike a bare `vi.waitFor` or
+ * process envelope described above. Race each attempt against the
+ * deadline's remaining time, so a callback that never settles fails at this
+ * helper's deadline instead of bypassing it. Unlike a bare `vi.waitFor` or
  * `expect.poll`, report the last observed error when the deadline expires,
  * together with `label` and the elapsed time, so a failure names what the
  * wait was waiting for and how long it waited.
@@ -46,22 +95,24 @@ export async function waitForCapabilityLiveProcess<T>(
     `no attempt of "${label}" settled before the deadline`,
   );
   for (;;) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw buildDeadlineExceededError(label, Date.now() - start, lastError);
+    }
     try {
-      return await callback();
+      return await raceAttemptAgainstDeadline(callback, remainingMs);
     } catch (error) {
+      if (error instanceof CapabilityLiveProcessAttemptTimeout) {
+        throw buildDeadlineExceededError(
+          label,
+          Date.now() - start,
+          lastError,
+        );
+      }
       lastError = error;
     }
-    const elapsedMs = Date.now() - start;
     if (Date.now() >= deadline) {
-      const detail =
-        lastError instanceof Error
-          ? (lastError.stack ?? lastError.message)
-          : String(lastError);
-      throw new Error(
-        `Wait for "${label}" did not settle within ${CAPABILITY_LIVE_PROCESS_WAIT_DEADLINE_MS}ms ` +
-          `(observed ${elapsedMs}ms). Last observed error: ${detail}`,
-        { cause: lastError },
-      );
+      throw buildDeadlineExceededError(label, Date.now() - start, lastError);
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
