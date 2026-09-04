@@ -126,6 +126,10 @@ describe("public repository paid workflow security", () => {
       "repos/$REPOSITORY/branches/$encoded_branch",
     );
     expect(authorizeJob).toContain('echo "sha=$target_sha"');
+    expect(authorizeJob).toContain(
+      "target_ref: ${{ steps.target.outputs.ref }}",
+    );
+    expect(authorizeJob).toContain('echo "ref=refs/heads/$TARGET_BRANCH"');
     expect(authorizeJob).not.toContain("actions/checkout@");
     expect(authorizeJob).not.toContain("pnpm install");
     expect(targetLockJob).toContain("name: Resolve target pnpm lockfile");
@@ -286,6 +290,14 @@ describe("public repository paid workflow security", () => {
       "ref: ${{ needs.authorize.outputs.target_sha }}",
     );
     expect(historyJob).not.toContain("Download resolved target lockfile");
+    for (const targetProvenanceJob of [paidJob, reportJob]) {
+      expect(targetProvenanceJob).toContain(
+        "PAPERCLIP_RUNNER_E2E_SOURCE_SHA: ${{ needs.authorize.outputs.target_sha }}",
+      );
+      expect(targetProvenanceJob).toContain(
+        "PAPERCLIP_RUNNER_E2E_SOURCE_REF: ${{ needs.authorize.outputs.target_ref }}",
+      );
+    }
     for (const [secret, condition] of Object.entries({
       OPENAI_API_KEY: "matrix.credentialName == 'OPENAI_API_KEY'",
       ANTHROPIC_API_KEY: "matrix.credentialName == 'ANTHROPIC_API_KEY'",
@@ -387,6 +399,14 @@ describe("public repository paid workflow security", () => {
     expect(buildJob).toContain(
       "provider_pack_artifact_name: ${{ steps.provider_pack_artifact_name.outputs.name }}",
     );
+    expect(buildJob).toContain(
+      "runner-e2e-build-${TARGET_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+    );
+    expect(buildJob).toContain(
+      "runner-e2e-provider-pack-${TARGET_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+    );
+    expect(buildJob).not.toContain("runner-e2e-build-${GITHUB_SHA}");
+    expect(buildJob).not.toContain("runner-e2e-provider-pack-${GITHUB_SHA}");
     expect(workflow).toContain("needs_runner_typescript=");
     expect(workflow).toContain("needs_native_binaries=");
     expect(workflow).toContain("needs_remote_provider_pack=");

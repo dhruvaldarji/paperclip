@@ -60,6 +60,7 @@ jobs:
       max_parallel_default: ${{ steps.runner.outputs.max_parallel_default }}
       max_parallel_limit: ${{ steps.runner.outputs.max_parallel_limit }}
       target_sha: ${{ steps.target.outputs.sha }}
+      target_ref: ${{ steps.target.outputs.ref }}
     steps:
       - name: Require default branch and allowlisted numeric actor IDs
         env:
@@ -113,6 +114,7 @@ jobs:
             exit 1
           fi
           echo "sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/heads/$TARGET_BRANCH" >> "$GITHUB_OUTPUT"
           echo "Resolved the requested repository branch to $target_sha."
 
       - name: Select paid test runner
@@ -554,7 +556,9 @@ jobs:
 
       - name: Name immutable shared campaign outputs
         id: build_artifact_name
-        run: echo "name=runner-e2e-build-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        env:
+          TARGET_SHA: ${{ needs.authorize.outputs.target_sha }}
+        run: echo "name=runner-e2e-build-${TARGET_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable shared campaign outputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -684,7 +688,9 @@ jobs:
       - name: Name immutable remote provider pack
         id: provider_pack_artifact_name
         if: needs.catalog.outputs.needs_remote_provider_pack == 'true'
-        run: echo "name=runner-e2e-provider-pack-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        env:
+          TARGET_SHA: ${{ needs.authorize.outputs.target_sha }}
+        run: echo "name=runner-e2e-provider-pack-${TARGET_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable remote provider pack
         if: needs.catalog.outputs.needs_remote_provider_pack == 'true'
@@ -895,6 +901,8 @@ jobs:
           PAPERCLIP_E2E_DAYTONA_IMAGE: ${{ needs.daytona_image.outputs.image }}
           PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH: ${{ github.workspace }}/packages/paperclip-runner/provider-pack
           PAPERCLIP_E2E_CAMPAIGN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.executionId }}
+          PAPERCLIP_RUNNER_E2E_SOURCE_SHA: ${{ needs.authorize.outputs.target_sha }}
+          PAPERCLIP_RUNNER_E2E_SOURCE_REF: ${{ needs.authorize.outputs.target_ref }}
         run: pnpm test:e2e:runner -- --id "${{ matrix.executionId }}"
 
       - name: Upload access-controlled packaged cell evidence
@@ -980,6 +988,8 @@ jobs:
           PAPERCLIP_RUNNER_E2E_REPORT_OUT: ${{ github.workspace }}/runner-e2e-merged-report/normalized
           PAPERCLIP_RUNNER_E2E_EXPECTED_IDS: ${{ needs.catalog.outputs.execution_ids }}
           PAPERCLIP_E2E_CAMPAIGN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          PAPERCLIP_RUNNER_E2E_SOURCE_SHA: ${{ needs.authorize.outputs.target_sha }}
+          PAPERCLIP_RUNNER_E2E_SOURCE_REF: ${{ needs.authorize.outputs.target_ref }}
         run: |
           set +e
           pnpm test:e2e:runner:report
