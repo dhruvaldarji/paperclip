@@ -48,15 +48,82 @@ async function collectSourceFiles(target) {
   return files;
 }
 
+// Report whether the `/` at `source[index]` most likely opens a regex
+// literal rather than divides two values. This looks at the last non-space
+// character before `index`: an identifier, a number, or a `)`/`]` that
+// closes a value means `/` divides, unless that identifier is a keyword
+// (`return`, `typeof`, `case`, and so on) that itself expects an expression
+// next. Anything else — an operator, an opening bracket, the start of the
+// scanned text, or none of the above — means `/` opens a regex literal.
+// This is the same ambiguity a full JavaScript parser resolves with grammar
+// state; this heuristic only needs to hold for the code this guard scans.
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+  "yield", "case", "throw", "do", "else",
+]);
+
+function isRegexLiteralStart(source, index) {
+  let previousIndex = index - 1;
+  while (previousIndex >= 0 && /\s/.test(source[previousIndex])) {
+    previousIndex -= 1;
+  }
+  if (previousIndex < 0) return true;
+  const previousCharacter = source[previousIndex];
+  if (!/[\w$)\]]/.test(previousCharacter)) return true;
+  const wordMatch = source.slice(0, previousIndex + 1).match(/[A-Za-z_$][\w$]*$/);
+  const word = wordMatch?.[0] ?? "";
+  return REGEX_PRECEDING_KEYWORDS.has(word);
+}
+
+// Mask a `/pattern/flags` regex literal, starting at the opening `/` in
+// `source[start]`, with spaces up to and including its trailing flags. A
+// `{`, `}`, `(`, `)`, `[`, or `]` inside the pattern is part of the regex,
+// not executable-code structure, so masking the whole literal — the same
+// way a string literal is masked — keeps it from changing brace depth or
+// confusing paren matching. A `/` inside a `[...]` character class does not
+// close the literal.
+function maskRegexLiteral(source, masked, start, end) {
+  let index = start;
+  masked[index] = " ";
+  index += 1;
+  let inCharacterClass = false;
+  while (index < end) {
+    const character = source[index];
+    if (character === "\n") return index;
+    if (character === "\\" && index + 1 < end) {
+      masked[index] = " ";
+      index += 1;
+      if (source[index] !== "\n") masked[index] = " ";
+      index += 1;
+      continue;
+    }
+    if (character === "[") inCharacterClass = true;
+    if (character === "]") inCharacterClass = false;
+    masked[index] = " ";
+    index += 1;
+    if (character === "/" && !inCharacterClass) {
+      while (index < end && /[a-zA-Z]/.test(source[index])) {
+        masked[index] = " ";
+        index += 1;
+      }
+      return index;
+    }
+  }
+  return index;
+}
+
 // Scan `source` from `start` up to `end` as executable code, writing spaces
-// into `masked` for each comment and each string- or template-literal quote
-// character it finds, then handing the literal body to `maskLiteralBody`.
-// Every other character stays as it is in `source`, so a wait-call pattern
-// written as real code — including inside a template's `${...}`
-// expression — still matches once masking is done. When `stopAtOwnCloseBrace`
-// is true, `start` points just past a `${` this function did not consume,
-// and the function tracks nested `{`/`}` pairs so it returns right after the
-// `}` that closes this same interpolation, leaving both braces unmasked.
+// into `masked` for each comment, each regex literal, and each string- or
+// template-literal quote character it finds, then handing the literal body
+// to `maskLiteralBody`. Every other character stays as it is in `source`, so
+// a wait-call pattern written as real code — including inside a template's
+// `${...}` expression — still matches once masking is done. When
+// `stopAtOwnCloseBrace` is true, `start` points just past a `${` this
+// function did not consume, and the function tracks nested `{`/`}` pairs so
+// it returns right after the `}` that closes this same interpolation,
+// leaving both braces unmasked. Masking a regex literal whole, before this
+// tracking sees any of its characters, keeps a brace inside the regex from
+// changing that count.
 function maskCode(source, masked, start, end, stopAtOwnCloseBrace) {
   let index = start;
   let braceDepth = stopAtOwnCloseBrace ? 1 : 0;
@@ -83,6 +150,10 @@ function maskCode(source, masked, start, end, stopAtOwnCloseBrace) {
         masked[index + 1] = " ";
         index += 2;
       }
+      continue;
+    }
+    if (character === "/" && isRegexLiteralStart(source, index)) {
+      index = maskRegexLiteral(source, masked, index, end);
       continue;
     }
     if (character === "'" || character === '"') {
