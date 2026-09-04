@@ -239,7 +239,10 @@ export function resolveConnectionMethodServerUrl(
 
 export function recommendedDefaultsForApp(app: AppDefinition, methodKey?: string | null): Record<string, unknown> {
   // Keep the parameters in the public contract: callers resolve defaults for a
-  // concrete app/method even though the initial policy is now uniform.
+  // concrete app/method even though the initial policy is now uniform. This is
+  // an open default, not an approval bypass: connection finalization remains a
+  // configure-authorized, audited operation, and Ask first stays available as
+  // an operator-selected policy for any action after the connection is made.
   void app;
   void methodKey;
   return {

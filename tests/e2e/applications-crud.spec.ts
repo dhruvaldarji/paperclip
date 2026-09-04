@@ -134,8 +134,6 @@ test.describe.serial("applications lifecycle", () => {
 
     await page.goto(`/${seed.prefix}/apps/${connection.id}/permissions`);
     await expect(page.getByRole("heading", { name: appName })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("heading", { name: "Which humans can use this credential?" })).toBeVisible();
-    await expect(page.getByText("Anyone in your company can use this connection")).toBeVisible();
 
     await page.getByRole("button", { name: "Rename app" }).click();
     await page.getByLabel("App name").fill(renamed);

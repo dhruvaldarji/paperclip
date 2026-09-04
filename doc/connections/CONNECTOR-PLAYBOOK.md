@@ -281,6 +281,12 @@ The current product behavior is encoded by `recommendedDefaultsForApp` in
   concern; do not turn writes Off as a substitute for correct risk
   classification.
 
+This is an opt-in restriction model. Finishing a connection is still limited to
+a board user with connection-configuration access, commits the selected action
+IDs to an auditable profile, and leaves **Ask first** available for any action.
+The open default changes the initial policy; it does not create a route around a
+policy the operator has applied.
+
 If a destructive provider cannot be safe with those defaults, add a narrowly
 reviewed provider policy with tests. Do not hide a dangerous tool by
 misclassifying it as read, and do not silently change global defaults in a
@@ -742,7 +748,8 @@ Walk the user path:
    it returns to
    `?source=<slug>&resume=<connection-id>` without creating another draft.
 7. Complete setup. Confirm the connection is active/healthy and opens
-   `/<company-prefix>/apps/<connection-id>/test`.
+   `/<company-prefix>/apps/<connection-id>/permissions`, then use the action's
+   **Test** button.
 
 For OAuth, the instance callback must be browser-reachable and must match the
 provider registration. Loopback HTTP is acceptable only when provider and
