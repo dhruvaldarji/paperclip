@@ -1441,6 +1441,19 @@ describe("AgentConfigForm environment selector", () => {
 
     expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledWith("WXYZ-1234");
     expect(mockClipboard.copyTextToClipboard).toHaveBeenCalledWith("https://auth.example.test/device");
+
+    // Code above URL, and the numbering agrees. Opening the page is what leaves
+    // this screen for a form that wants the code from it, so the code is read
+    // while it is still in front of you. The panel used to run the other way.
+    const labels = [...result.container.querySelectorAll("div")]
+      .map((el) => el.textContent?.trim())
+      .filter((t) => t === "1. Code" || t === "2. Authentication URL");
+    expect(labels).toEqual(["1. Code", "2. Authentication URL"]);
+
+    const codeIndex = result.container.textContent!.indexOf("WXYZ-1234");
+    const urlIndex = result.container.textContent!.indexOf("https://auth.example.test/device");
+    expect(codeIndex).toBeGreaterThan(-1);
+    expect(urlIndex).toBeGreaterThan(codeIndex);
   });
 
   it("keeps the code and URL visible after a later poll returns no prompt", async () => {

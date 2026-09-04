@@ -2275,16 +2275,36 @@ function DisplayedCodeLoginPanel({
         {isActive && prompt && (
           <div className="space-y-2">
             <div className="text-(length:--text-micro) text-muted-foreground">
-              Open the authentication page and enter the code.
+              Copy the code, then open the authentication page.
             </div>
-          {/* URL first, then the code. The instruction above says to open the
-              page and *then* enter the code, and the numbering now says the
-              same — so the order the two rows appear in has to agree with both,
-              rather than handing over the code before the page it belongs to. */}
+          {/* Code first, then the URL, and the sentence and the numbering both
+              say so.
+
+              This used to run the other way, on the reasoning that handing over
+              a code before the page it belongs to was getting ahead of the
+              customer. What that missed is where the two rows are used: opening
+              the page is what leaves this screen, and the form waiting on the
+              other side wants the code that was on this one. Reaching back for
+              it is the step worth removing, so the code is read and copied
+              while it is still in front of you.
+
+              The onboarding card is ordered the same way and for the same
+              reason. The Claude panel below is not, and should not be — its
+              second row is a field to type *into*, so there the page genuinely
+              does come first. */}
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="text-(length:--text-micro) uppercase tracking-wide text-muted-foreground">
-                1. Authentication URL
+                1. Code
+              </div>
+              <span className="font-mono text-xs text-foreground break-all">{prompt.code}</span>
+            </div>
+            <AdapterLoginCopyButton value={prompt.code} label="Copy code" />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-(length:--text-micro) uppercase tracking-wide text-muted-foreground">
+                2. Authentication URL
               </div>
               <span className="font-mono text-xs text-foreground break-all">{prompt.url}</span>
             </div>
@@ -2304,15 +2324,6 @@ function DisplayedCodeLoginPanel({
                 </a>
               </Button>
             </div>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="text-(length:--text-micro) uppercase tracking-wide text-muted-foreground">
-                2. Code
-              </div>
-              <span className="font-mono text-xs text-foreground break-all">{prompt.code}</span>
-            </div>
-            <AdapterLoginCopyButton value={prompt.code} label="Copy code" />
           </div>
         </div>
         )}
