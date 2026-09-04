@@ -2122,6 +2122,20 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       expect(document.body.textContent).toContain("Open authentication link and enter code");
       expect(document.body.textContent).toContain("Q2RJ-E1YIF");
 
+      // Code above link, deliberately. Pressing the link is what takes the
+      // customer to another tab, and it wants the code that was on this one —
+      // so the code has to have been read before the link is there to press.
+      const code = [...document.body.querySelectorAll("span")].find(
+        (el) => el.textContent?.trim() === "Q2RJ-E1YIF",
+      );
+      const link = document.body.querySelector('a[href*="auth.openai.com"]');
+      expect(code, "the code row should render").toBeTruthy();
+      expect(link, "the link row should render").toBeTruthy();
+      expect(
+        code!.compareDocumentPosition(link!) & Node.DOCUMENT_POSITION_FOLLOWING,
+        "the code should come before the link",
+      ).toBeTruthy();
+
       await act(async () => root.unmount());
     });
 

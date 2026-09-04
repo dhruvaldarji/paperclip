@@ -2188,10 +2188,19 @@ function DisplayedCodeLoginPanel({
             Preparing…
           </p>
         )}
+        {/* Code above link, which is the reverse of the settings panel below.
+            The panel numbers its two rows and its instruction reads "open the
+            page and enter the code", so there the order follows the sentence.
+
+            Here the order follows the hands. The link is the last thing touched
+            and the first thing that takes attention away — press it and the
+            next screen is a device-code form in another tab, wanting the code
+            that was on this one. Putting the code above it means it has already
+            been read, and copied, before the link is there to be pressed. */}
         {prompt && (
           <>
-            <OnboardingLoginUrlRow url={prompt.url} />
             <OnboardingLoginCodeRow code={prompt.code} />
+            <OnboardingLoginUrlRow url={prompt.url} />
           </>
         )}
         {isTerminal && status && status !== "authenticated" && (
