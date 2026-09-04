@@ -10933,6 +10933,7 @@ export function issueRoutes(
             agentId: actorAgent.id,
             adapterType: actorAgent.adapterType,
             model,
+            taskId: issue.id,
           });
         }
       }
