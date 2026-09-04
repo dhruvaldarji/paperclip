@@ -2168,8 +2168,13 @@ function DisplayedCodeLoginPanel({
   if (chrome === "onboarding") {
     return (
       <OnboardingLoginCard
+        // Reads in the order the rows sit in, and in the order they are used:
+        // the code first, because the link is what leaves this screen. The
+        // sibling card's "Open Claude link then come back and enter code" has
+        // the same shape — one sentence, "then" for the hand-off — because
+        // there the returning is the part worth saying.
         instruction={
-          prompt ? "Open authentication link and enter code" : "Starting the sign-in…"
+          prompt ? "Copy this code then open the authentication link" : "Starting the sign-in…"
         }
         onCancel={isActive ? handleCancel : undefined}
       >

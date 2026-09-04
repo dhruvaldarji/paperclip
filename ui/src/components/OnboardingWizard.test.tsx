@@ -2119,7 +2119,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       expect(mockAgentsApi.hire).not.toHaveBeenCalled();
       // The displayed-code login hands a code over rather than taking one back,
       // so both halves of it have to reach the screen.
-      expect(document.body.textContent).toContain("Open authentication link and enter code");
+      expect(document.body.textContent).toContain("Copy this code then open the authentication link");
       expect(document.body.textContent).toContain("Q2RJ-E1YIF");
 
       // Code above link, deliberately. Pressing the link is what takes the

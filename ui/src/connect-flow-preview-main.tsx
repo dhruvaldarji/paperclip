@@ -203,7 +203,7 @@ function ConnectFlowPreview({
                 </OnboardingLoginCard>
               ) : (
                 <OnboardingLoginCard
-                  instruction="Open authentication link and enter code"
+                  instruction="Copy this code then open the authentication link"
                   onCancel={reset}
                 >
                   {/* Code above link — see the same order in the shipped panel.
