@@ -36,6 +36,13 @@ import { FolderOpen, Heart, ChevronDown, X, Copy, Check, ExternalLink, Loader2, 
 import { asBoolean, asFiniteNumber, asObject, cn } from "../lib/utils";
 import { copyTextToClipboard } from "../lib/clipboard";
 import {
+  OnboardingLoginCard,
+  OnboardingLoginCodeInput,
+  OnboardingLoginCodeRow,
+  OnboardingLoginUrlRow,
+  type AdapterLoginChrome,
+} from "./AdapterLoginChrome";
+import {
   resolveAdapterTestEnvironmentId,
   resolveLocalDefaultEnvironmentId,
   resolveManagedSandboxEnvironmentId,
@@ -1999,9 +2006,32 @@ export type AdapterLoginDescriptor = {
 // `onApplyStored` binds the fixed reference to an existing stored login with no
 // new login round trip. The panel shows the apply-existing affordance only when
 // the status route reports a stored value.
+// `autoStart`, `onCancel`, `onConnected` and `chrome` are what the onboarding
+// connect step needs, and each is off or absent by default so the two settings
+// surfaces that render this panel keep the behaviour they have.
+//
+// They are props on the existing panels rather than a second implementation
+// because the part onboarding needs unchanged is the whole of it: the session
+// start, the two polls, the server deadline, the one-shot completion read, the
+// unmount release. A copy drawn to the new design would have had to reproduce
+// all of that correctly, and the first thing to rot would have been the
+// timeout and cleanup paths, which are the ones nobody exercises by hand.
 export type AdapterLoginPanelProps = AdapterLoginDescriptor & {
   onStored?: (storedSessionId: string) => void;
   onApplyStored?: () => void;
+  // Start the login on mount instead of waiting for a press. The connect step's
+  // footer button is the press — by the time the panel is rendered there, the
+  // customer has already asked for this.
+  autoStart?: boolean;
+  // The customer abandoned the login from inside the card. The panel has
+  // already cancelled the server session by the time this fires; the caller
+  // uses it to put its own control back to the state it started in.
+  onCancel?: () => void;
+  // The login reached its success state. Onboarding advances on this, which is
+  // why the `onboarding` chrome draws no success state of its own — the screen
+  // it would appear on is already gone.
+  onConnected?: () => void;
+  chrome?: AdapterLoginChrome;
 };
 
 // The login panel dispatcher. It picks the panel from the projected panel mode,
@@ -2040,6 +2070,10 @@ function DisplayedCodeLoginPanel({
   companyId,
   adapterType,
   environmentId,
+  autoStart,
+  onCancel,
+  onConnected,
+  chrome = "panel",
 }: AdapterLoginPanelProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -2099,6 +2133,79 @@ function DisplayedCodeLoginPanel({
   const isTerminal = status ? ADAPTER_LOGIN_TERMINAL_STATUSES.has(status) : false;
   const isActive = Boolean(sessionId) && !isTerminal;
   const startDisabled = startLogin.isPending || isActive;
+
+  // Start once, on mount, when the caller has already taken the press. The ref
+  // is the guard rather than the mutation's own pending flag: `startLogin`
+  // settles, and without a latch a re-render after it settles would read "not
+  // pending, no session yet" during the gap before the session id lands and
+  // start a second login the server would count against the per-owner cap.
+  const autoStartedRef = useRef(false);
+  const startLoginRef = useRef(startLogin.mutate);
+  startLoginRef.current = startLogin.mutate;
+  useEffect(() => {
+    if (!autoStart || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    startLoginRef.current();
+  }, [autoStart]);
+
+  // Report success upward once. `authenticated` is this panel's terminal
+  // success: unlike the Claude login there is no completion read after it, so
+  // the status is the whole of the news.
+  const connectedRef = useRef(false);
+  const onConnectedRef = useRef(onConnected);
+  onConnectedRef.current = onConnected;
+  useEffect(() => {
+    if (status !== "authenticated" || connectedRef.current) return;
+    connectedRef.current = true;
+    onConnectedRef.current?.();
+  }, [status]);
+
+  const handleCancel = () => {
+    cancelLogin.mutate();
+    onCancel?.();
+  };
+
+  if (chrome === "onboarding") {
+    return (
+      <OnboardingLoginCard
+        instruction={
+          prompt ? "Open authentication link and enter code" : "Starting the sign-in…"
+        }
+        onCancel={isActive ? handleCancel : undefined}
+      >
+        {/* The two rows are the whole card once the prompt lands. Before it
+            does there is nothing to show but the wait, and after a failure
+            there is nothing to act on — so both of those are a line of text,
+            not a row. */}
+        {startError && (
+          <p role="alert" className="pl-2 text-xs text-destructive">
+            {startError}
+          </p>
+        )}
+        {isActive && !prompt && !startError && (
+          <p className="flex items-center gap-2 pl-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3 shrink-0 animate-spin" />
+            Preparing…
+          </p>
+        )}
+        {prompt && (
+          <>
+            <OnboardingLoginUrlRow url={prompt.url} />
+            <OnboardingLoginCodeRow code={prompt.code} />
+          </>
+        )}
+        {isTerminal && status && status !== "authenticated" && (
+          <p role="alert" className="pl-2 text-xs text-destructive">
+            {status === "timed_out"
+              ? "The login timed out. Start it again."
+              : status === "cancelled"
+                ? "The login was cancelled."
+                : "The login did not finish. Start it again."}
+          </p>
+        )}
+      </OnboardingLoginCard>
+    );
+  }
 
   return (
     <div className="rounded-md border border-border bg-muted/40 px-3 py-2 flex flex-col gap-2">
@@ -2245,6 +2352,10 @@ function SubmittedBrowserCodeLoginPanel({
   environmentId,
   onStored,
   onApplyStored,
+  autoStart,
+  onCancel,
+  onConnected,
+  chrome = "panel",
 }: AdapterLoginPanelProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -2557,6 +2668,117 @@ function SubmittedBrowserCodeLoginPanel({
     // the input.
     setBrowserCode("");
   };
+
+  // Start once, on mount, when the caller has already taken the press. Latched
+  // for the same reason as the displayed-code panel: a second start would burn
+  // an owner reservation, and here it would also rotate the stored token twice.
+  const autoStartedRef = useRef(false);
+  const startLoginRef = useRef(startLogin.mutate);
+  startLoginRef.current = startLogin.mutate;
+  useEffect(() => {
+    if (!autoStart || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    startLoginRef.current();
+  }, [autoStart]);
+
+  /**
+   * Submit as soon as what is in the field is a whole code.
+   *
+   * Only in the onboarding chrome, and only here: this is the login where the
+   * code is pasted *back*, so the paste is the answer and a Submit press after
+   * it confirms nothing the paste did not already say. The displayed-code login
+   * has no field to watch.
+   *
+   * `isValidBrowserCode` is the shape check the Submit button already gated on,
+   * so this fires on exactly the input that button would have accepted — a
+   * half-typed code never reaches the server, and a bad paste is rejected
+   * before the round trip rather than by it.
+   *
+   * `submitCode.isPending` is inside `canSubmit`, and `handleSubmit` clears the
+   * field, so the effect cannot resubmit the same code: the next run sees an
+   * empty field and stops at the shape check.
+   */
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+  const autoSubmit = chrome === "onboarding";
+  useEffect(() => {
+    if (!autoSubmit || !canSubmit) return;
+    handleSubmitRef.current();
+  }, [autoSubmit, canSubmit]);
+
+  // Report success upward once. The `stored` state is the only success state,
+  // which is why this watches `isStored` and not the `authenticated` status the
+  // completion read still has to follow.
+  const connectedRef = useRef(false);
+  const onConnectedRef = useRef(onConnected);
+  onConnectedRef.current = onConnected;
+  useEffect(() => {
+    if (!isStored || connectedRef.current) return;
+    connectedRef.current = true;
+    onConnectedRef.current?.();
+  }, [isStored]);
+
+  const handleCancel = () => {
+    cancelLogin.mutate();
+    onCancel?.();
+  };
+
+  if (chrome === "onboarding") {
+    return (
+      <OnboardingLoginCard
+        instruction={
+          authorizationUrl
+            ? "Open Claude link then come back and enter code"
+            : "Starting the sign-in…"
+        }
+        onCancel={isActive ? handleCancel : undefined}
+      >
+        {startError && (
+          <p role="alert" className="pl-2 text-xs text-destructive">
+            {startError}
+          </p>
+        )}
+        {/* The plain-HTTP advisory survives the redesign. It is the one thing
+            on this card that is not about getting the login done, and dropping
+            it to keep the card tidy would remove a warning about a code
+            travelling in clear text. */}
+        {transportInsecure && (
+          <p className="flex items-start gap-2 pl-2 text-xs text-amber-700 dark:text-amber-200">
+            <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+            This connection is not encrypted. The login code travels in clear text on this
+            network. Continue only on a network you trust.
+          </p>
+        )}
+        {isActive && !authorizationUrl && !startError && (
+          <p className="flex items-center gap-2 pl-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3 shrink-0 animate-spin" />
+            Preparing…
+          </p>
+        )}
+        {authorizationUrl && (
+          <>
+            <OnboardingLoginUrlRow url={authorizationUrl} />
+            {/* Disabled while the submitted code is in flight and while the
+                completion read runs, so a second paste cannot land on top of a
+                login that is already finishing. */}
+            <OnboardingLoginCodeInput
+              value={browserCode}
+              onChange={setBrowserCode}
+              onSubmit={handleSubmit}
+              disabled={submitCode.isPending || isCompleting}
+            />
+          </>
+        )}
+        {(isFailure || timedOut) && (
+          <p role="alert" className="pl-2 text-xs text-destructive">
+            {timedOut && !isFailure
+              ? CLAUDE_LOGIN_TIMED_OUT_MESSAGE
+              : CLAUDE_LOGIN_FAILED_MESSAGE}
+          </p>
+        )}
+      </OnboardingLoginCard>
+    );
+  }
 
   return (
     <div className="rounded-md border border-border bg-muted/40 px-3 py-2 flex flex-col gap-2">
